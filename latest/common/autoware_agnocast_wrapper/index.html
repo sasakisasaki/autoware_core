@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../docs/assets/images/autoware-foundation.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+      <meta name="generator" content="mkdocs-ProperDocs 1.6.7, mkdocs-material-9.7.6">
     
     
       
@@ -324,7 +324,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../control/autoware_core_control/" class="md-tabs__link">
+        <a href="../../control/autoware_command_gate/" class="md-tabs__link">
           
   
   
@@ -3162,6 +3162,8 @@
       
         
       
+        
+      
     
     
     
@@ -3241,14 +3243,14 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../../control/autoware_core_control/" class="md-nav__link ">
+            <a href="../../control/autoware_command_gate/" class="md-nav__link ">
               
   
   
   <span class="md-ellipsis">
     
   
-    Autoware core control
+    Autoware command gate
   
 
     
@@ -3265,7 +3267,7 @@
             <span class="md-nav__icon md-icon"></span>
             
   
-    Autoware core control
+    Autoware command gate
   
 
           </label>
@@ -3313,6 +3315,78 @@
         
           
           <div class="md-nav__link md-nav__container">
+            <a href="../../control/autoware_core_control/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Autoware core control
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Autoware core control
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
             <a href="../../control/autoware_simple_pure_pursuit/" class="md-nav__link ">
               
   
@@ -3332,8 +3406,8 @@
             
           </div>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_4_2">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_3">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -7593,17 +7667,123 @@
 <p>This package provides two approaches for integrating Agnocast. Both will coexist for the foreseeable future.</p>
 <h3 id="1-node-wrapper-agnocast_wrappernode">1. Node Wrapper (<code>agnocast_wrapper::Node</code>)<a class="headerlink" href="#1-node-wrapper-agnocast_wrappernode" title="Permanent link">#</a></h3>
 <p>Use this when you want the <strong>entire node</strong> to transparently switch between <code>rclcpp::Node</code> and <code>agnocast::Node</code> at runtime. The node wrapper automatically selects the correct underlying implementation based on the <code>ENABLE_AGNOCAST</code> environment variable.</p>
-<p>Currently supported APIs:</p>
-<ul>
-<li>Publisher / Subscription / PollingSubscriber</li>
-<li>Parameters</li>
-<li>Logger, Clock</li>
-<li>Callback groups</li>
-<li>Node interfaces (partial: <code>get_node_base_interface()</code>, <code>get_node_topics_interface()</code>, <code>get_node_parameters_interface()</code>)</li>
-</ul>
+<p><code>agnocast_wrapper::Node</code> does <strong>not</strong> publicly derive from <code>rclcpp::Node</code>. It exposes a curated subset
+of the <code>rclcpp::Node</code> surface and forwards each member to the underlying implementation (<code>rclcpp::Node</code>
+or <code>agnocast::Node</code>). This subset is <strong>identical in both builds</strong> (<code>ENABLE_AGNOCAST=0</code> and <code>=1</code>), so a
+node written against it compiles unchanged either way. If you need an API that is not listed below,
+reach the underlying node via <code>get_rclcpp_node()</code> (always available) or extend the wrapper.</p>
+<h4 id="supported-api-surface">Supported API surface<a class="headerlink" href="#supported-api-surface" title="Permanent link">#</a></h4>
+<p>The following members / free functions are provided. Unless noted, signatures mirror their
+<code>rclcpp::Node</code> counterparts.</p>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Members</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Construction</td>
+<td><code>Node(name, options)</code>, <code>Node(name, namespace, options)</code>, virtual destructor, <code>SharedPtr</code></td>
+</tr>
+<tr>
+<td>Basic info</td>
+<td><code>get_name()</code>, <code>get_namespace()</code>, <code>get_fully_qualified_name()</code>, <code>get_logger()</code></td>
+</tr>
+<tr>
+<td>Time</td>
+<td><code>get_clock()</code>, <code>now()</code></td>
+</tr>
+<tr>
+<td>Node interfaces</td>
+<td><code>get_node_base_interface()</code>, <code>get_node_topics_interface()</code>, <code>get_node_parameters_interface()</code> (partial — only these three)</td>
+</tr>
+<tr>
+<td>Callback groups</td>
+<td><code>create_callback_group()</code></td>
+</tr>
+<tr>
+<td>Parameters</td>
+<td><code>declare_parameter()</code> (typed + <code>ParameterValue</code>/<code>ParameterType</code> overloads), <code>has_parameter()</code>, <code>undeclare_parameter()</code>, <code>get_parameter()</code> / <code>get_parameters()</code> (typed + prefix overloads), <code>set_parameter()</code> / <code>set_parameters()</code> / <code>set_parameters_atomically()</code>, <code>describe_parameter(s)()</code>, <code>get_parameter_types()</code>, <code>list_parameters()</code>, <code>add_on_set_parameters_callback()</code>, <code>remove_on_set_parameters_callback()</code></td>
+</tr>
+<tr>
+<td>Publisher</td>
+<td><code>create_publisher&lt;MessageT&gt;()</code> (<code>QoS</code> and depth overloads)</td>
+</tr>
+<tr>
+<td>Subscription</td>
+<td><code>create_subscription&lt;MessageT&gt;()</code> (<code>QoS</code> and depth overloads)</td>
+</tr>
+<tr>
+<td>Polling subscriber</td>
+<td><code>create_polling_subscriber&lt;MessageT&gt;()</code> (<code>QoS</code> and depth overloads)</td>
+</tr>
+<tr>
+<td>Client</td>
+<td><code>create_client&lt;ServiceT&gt;()</code> — takes <code>rclcpp::QoS</code> (the wrapper normalizes the Humble vs. Jazzy QoS-argument difference)</td>
+</tr>
+<tr>
+<td>Service</td>
+<td><code>create_service&lt;ServiceT&gt;()</code> — <code>message_ptr</code> callback form and an rclcpp-style <code>shared_ptr</code> callback form</td>
+</tr>
+<tr>
+<td>Timer</td>
+<td><code>create_wall_timer()</code>; free <code>create_timer(node, clock, period, cb, group)</code> and free <code>set_period(timer, period)</code> (see <a href="#timer-notes">Timer notes</a>)</td>
+</tr>
+<tr>
+<td>Underlying node</td>
+<td><code>get_rclcpp_node()</code>; <code>get_agnocast_node()</code> (agnocast-enabled build only — not declared in an agnocast-disabled build, so calling it there is a compile error); free <code>to_rclcpp_node(node)</code></td>
+</tr>
+</tbody>
+</table>
 <blockquote>
-<p><strong>Note:</strong> Timer (<code>create_wall_timer</code>, <code>create_timer</code>) is not yet supported and will be added in a future update.</p>
+<p><code>OnSetParametersCallbackType</code> is aliased in this namespace and resolves to the correct rclcpp type
+for both Humble (rclcpp 16.x) and Jazzy (rclcpp 28+).</p>
 </blockquote>
+<h4 id="build-modes-agnocast-disabled-vs-agnocast-enabled">Build modes: agnocast-disabled vs agnocast-enabled<a class="headerlink" href="#build-modes-agnocast-disabled-vs-agnocast-enabled" title="Permanent link">#</a></h4>
+<p>Which of the two <code>Node</code> <strong>class definitions</strong> is compiled is a <strong>build-time</strong> choice, selected by the
+<code>USE_AGNOCAST_ENABLED</code> preprocessor macro. The API surface above is identical in both, so this choice
+only affects the backend and the underlying-node accessors below.</p>
+<p>This is a separate axis from the <strong>runtime backend selection</strong>: in the agnocast-enabled build, each
+node <em>instance</em> additionally picks <code>rclcpp::Node</code> vs <code>agnocast::Node</code> at construction from the
+<code>ENABLE_AGNOCAST</code> environment variable read at runtime (<code>use_agnocast()</code>), fixed for the node's
+lifetime. The runtime value selects the backend; it does <em>not</em> change which <code>Node</code> definition was
+compiled or which methods are declared — e.g. <code>get_agnocast_node()</code> is declared in every
+agnocast-enabled build and instead throws at runtime when the node is not in Agnocast mode.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Agnocast-disabled build<br>(<code>USE_AGNOCAST_ENABLED</code> undefined)</th>
+<th>Agnocast-enabled build<br>(<code>USE_AGNOCAST_ENABLED</code> defined)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Backend</td>
+<td>Always an owned <code>rclcpp::Node</code>.</td>
+<td><code>rclcpp::Node</code> or <code>agnocast::Node</code>, chosen at construction from the runtime <code>ENABLE_AGNOCAST</code> value and fixed for the node's lifetime.</td>
+</tr>
+<tr>
+<td><code>get_rclcpp_node()</code></td>
+<td>Always returns the owned node.</td>
+<td>Declared; returns the <code>rclcpp::Node</code>, but <strong>throws</strong> <code>std::runtime_error</code> if the node is in Agnocast mode.</td>
+</tr>
+<tr>
+<td><code>get_agnocast_node()</code></td>
+<td><strong>Not declared</strong> — calling it is a compile error.</td>
+<td>Declared regardless of the runtime backend; returns the <code>agnocast::Node</code>, but <strong>throws</strong> if the node is not in Agnocast mode.</td>
+</tr>
+<tr>
+<td><code>to_rclcpp_node(node)</code></td>
+<td>Always succeeds.</td>
+<td>Forwards to <code>get_rclcpp_node()</code> (same throw condition).</td>
+</tr>
+</tbody>
+</table>
+<p>In both builds <code>agnocast_wrapper::Node</code> does not derive from <code>rclcpp::Node</code>, so hand it to an executor or
+utility via <code>get_node_base_interface()</code> (e.g. <code>executor.add_node(node-&gt;get_node_base_interface())</code>).</p>
 <p>```cpp</p>
 <h1 id="include">include <autoware agnocast_wrapper node.hpp><a class="headerlink" href="#include" title="Permanent link">#</a></autoware></h1>
 <p>class MyNode : public autoware::agnocast_wrapper::Node
@@ -7614,13 +7794,27 @@ public:
   {
     pub_ = create_publisher<std_msgs::msg::string>("output", 10);
     sub_ = create_subscription<std_msgs::msg::string>(
-      "input", 10, <a href="std::unique_ptr&lt;const%20std_msgs::msg::String&gt;%20msg">this</a> { /<em> ... </em>/ });
-  }</std_msgs::msg::string></std_msgs::msg::string></p>
+      "input", 10,
+      <a href="AUTOWARE_MESSAGE_CONST_SHARED_PTR(std_msgs::msg::String)%20&amp;&amp;%20msg">this</a> { /<em> ... </em>/ });</std_msgs::msg::string></std_msgs::msg::string></p>
+<div class="codehilite"><pre><span></span><code>timer_ = create_wall_timer(
+  std::chrono::milliseconds(100), [this]() { /* ... */ });
+</code></pre></div>
+
+<p>}</p>
 <p>private:
-  autoware::agnocast_wrapper::Publisher<std_msgs::msg::string>::SharedPtr pub_;
-  autoware::agnocast_wrapper::Subscription<std_msgs::msg::string>::SharedPtr sub_;
+  AUTOWARE_PUBLISHER_PTR(std_msgs::msg::String) pub_;
+  AUTOWARE_SUBSCRIPTION_PTR(std_msgs::msg::String) sub_;
+  AUTOWARE_TIMER_PTR timer_;
 };
-```</std_msgs::msg::string></std_msgs::msg::string></p>
+```</p>
+<h4 id="timer-notes">Timer notes<a class="headerlink" href="#timer-notes" title="Permanent link">#</a></h4>
+<p><code>create_timer()</code> is provided as a <strong>free function</strong> (not a member) because <code>rclcpp::Node::create_timer</code> was added in Jazzy and does not exist on Humble. The free form is portable across both:</p>
+<p><code>cpp
+timer_ = autoware::agnocast_wrapper::create_timer(
+  this, this-&gt;get_clock(), rclcpp::Duration::from_seconds(0.1), [this]() { /* ... */ });</code></p>
+<p><code>set_period()</code> is likewise a <strong>free function</strong>. <code>rclcpp::TimerBase</code> has no <code>set_period</code> member, so the free form is the only portable spelling across both builds:</p>
+<p><code>cpp
+autoware::agnocast_wrapper::set_period(timer_, std::chrono::milliseconds(200));</code></p>
 <p>To use the Node wrapper in your package, add the following to your <code>CMakeLists.txt</code>:</p>
 <p><code>cmake
 find_package(autoware_agnocast_wrapper REQUIRED)
@@ -7849,11 +8043,11 @@ ament_target_dependencies(target autoware_agnocast_wrapper)
 target_include_directories(target PRIVATE ${autoware_agnocast_wrapper_INCLUDE_DIRS})
 autoware_agnocast_wrapper_setup(target)</code></p>
 <h2 id="message-filters-support">Message Filters Support<a class="headerlink" href="#message-filters-support" title="Permanent link">#</a></h2>
-<p>This package provides wrapper types for <code>message_filters</code> (<code>Subscriber</code>, <code>Synchronizer</code>, <code>ApproximateTimeSynchronizer</code>) in the <code>autoware::agnocast_wrapper::message_filters</code> namespace. These wrappers transparently switch between <code>::message_filters</code> and <code>agnocast::message_filters</code> at runtime.</p>
+<p>This package provides wrapper types for <code>message_filters</code> (<code>Subscriber</code>, <code>Synchronizer</code>) in the <code>autoware::agnocast_wrapper::message_filters</code> namespace. These wrappers transparently switch between <code>::message_filters</code> and <code>agnocast::message_filters</code> at runtime.</p>
 <h3 id="current-limitations">Current limitations<a class="headerlink" href="#current-limitations" title="Permanent link">#</a></h3>
 <ul>
-<li>Only <code>ApproximateTime</code> synchronization policy is supported (no <code>ExactTime</code>).</li>
-<li>Maximum 2 message types per <code>Synchronizer</code>.</li>
+<li>Only <code>ApproximateTime</code> and <code>ExactTime</code> synchronization policies are supported.</li>
+<li>2 to 8 message types per <code>Synchronizer</code>. Upstream <code>message_filters</code> supports up to 9, but the registration path this wrapper uses caps it at 8.</li>
 <li><code>connectInput()</code> is not supported; pass <code>Subscriber</code> references at construction time.</li>
 </ul>
 <h3 id="usage-example">Usage example<a class="headerlink" href="#usage-example" title="Permanent link">#</a></h3>
@@ -7869,9 +8063,17 @@ info_sub.subscribe(node, "/camera/info", rmw_qos_profile_sensor_data);</sensor_m
 using Policy = sync_policies::ApproximateTime&lt;
     sensor_msgs::msg::Image, sensor_msgs::msg::CameraInfo&gt;;
 Synchronizer<policy> sync(Policy(10), image_sub, info_sub);</policy></p>
-<p>// 3. Register callback (use std::bind, not a lambda — see migration note below)
-sync.registerCallback(
-  std::bind(&amp;MyNode::onSynchronized, this, std::placeholders::_1, std::placeholders::_2));
+<p>// 3. Register callback. Mirrors <code>::message_filters::Synchronizer::registerCallback</code> —
+//    pass a member-function pointer and <code>this</code>, or a <code>std::bind</code> result, or any other
+//    callable convertible to <code>void(const AUTOWARE_MESSAGE_CONST_SHARED_PTR(M0) &amp;,
+//                                    const AUTOWARE_MESSAGE_CONST_SHARED_PTR(M1) &amp;)</code>.
+//    Returns a <code>::message_filters::Connection</code> for later <code>.disconnect()</code>.
+auto conn = sync.registerCallback(&amp;MyNode::onSynchronized, this);
+// Note: <code>conn</code> going out of scope does NOT unregister the callback.
+// Call conn.disconnect() explicitly if you need to remove it later.
+// Equivalent form (still supported):
+// sync.registerCallback(std::bind(
+//   &amp;MyNode::onSynchronized, this, std::placeholders::_1, std::placeholders::_2));
 ```</p>
 <p>The callback method signature should use <code>const</code> references:</p>
 <p><code>cpp
@@ -7903,8 +8105,131 @@ void onSynchronized(
 <td><code>message_filters::sync_policies::ApproximateTime&lt;M0, M1&gt;</code></td>
 <td><code>autoware::agnocast_wrapper::message_filters::sync_policies::ApproximateTime&lt;M0, M1&gt;</code></td>
 </tr>
+<tr>
+<td><code>message_filters::sync_policies::ExactTime&lt;M0, M1&gt;</code></td>
+<td><code>autoware::agnocast_wrapper::message_filters::sync_policies::ExactTime&lt;M0, M1&gt;</code></td>
+</tr>
 </tbody>
 </table>
+<h2 id="tf2-support">tf2 Support<a class="headerlink" href="#tf2-support" title="Permanent link">#</a></h2>
+<p>This package provides wrapper types for tf2 (<code>TransformListener</code>, <code>TransformBroadcaster</code>, <code>StaticTransformBroadcaster</code>, <code>Buffer</code>) in the <code>autoware::agnocast_wrapper</code> namespace. The listener and broadcasters transparently switch between their <code>tf2_ros</code> and <code>agnocast</code> implementations at runtime, depending on whether the given node is running in Agnocast mode.</p>
+<p>The node-taking constructors require a Method 2 node (<code>autoware::agnocast_wrapper::Node</code>). This is needed because an AgnocastOnly executor does not spin a plain <code>tf2_ros::TransformListener</code> (a ROS 2 subscription); routing <code>/tf</code> through Agnocast keeps tf callbacks firing.</p>
+<p><code>Buffer</code> aliases to <code>agnocast::Buffer</code> in Agnocast-enabled builds and <code>tf2_ros::Buffer</code> otherwise. The agnocast variant intentionally omits APIs that would silently break under an AgnocastOnly executor (currently <code>waitForTransform</code> / <code>setCreateTimerInterface</code> and the <code>/tf2_frames</code> debug service), so misuse is caught at compile time.</p>
+<h3 id="usage-example_1">Usage example<a class="headerlink" href="#usage-example_1" title="Permanent link">#</a></h3>
+<p>```cpp</p>
+<h1 id="include_3">include <autoware agnocast_wrapper node.hpp><a class="headerlink" href="#include_3" title="Permanent link">#</a></autoware></h1>
+<h1 id="include_4">include <autoware agnocast_wrapper tf2.hpp><a class="headerlink" href="#include_4" title="Permanent link">#</a></autoware></h1>
+<p>class MyNode : public autoware::agnocast_wrapper::Node
+{
+public:
+  MyNode()
+  : autoware::agnocast_wrapper::Node("my_node"), tf_buffer_(this-&gt;get_clock())
+  {
+    // <code>*this</code> is a node derived from autoware::agnocast_wrapper::Node.
+    tf_listener_ = std::make_unique<autoware::agnocast_wrapper::transformlistener>(
+      tf_buffer_, <em>this);
+    tf_broadcaster_ = std::make_unique<autoware::agnocast_wrapper::transformbroadcaster>(</autoware::agnocast_wrapper::transformbroadcaster></em>this);
+  }</autoware::agnocast_wrapper::transformlistener></p>
+<p>private:
+  autoware::agnocast_wrapper::Buffer tf_buffer_;
+  std::unique_ptr<autoware::agnocast_wrapper::transformlistener> tf_listener_;
+  std::unique_ptr<autoware::agnocast_wrapper::transformbroadcaster> tf_broadcaster_;
+};
+```</autoware::agnocast_wrapper::transformbroadcaster></autoware::agnocast_wrapper::transformlistener></p>
+<h3 id="migration-guide-from-tf2_ros">Migration guide (from <code>tf2_ros</code>)<a class="headerlink" href="#migration-guide-from-tf2_ros" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Before</th>
+<th>After</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>#include &lt;tf2_ros/transform_listener.hpp&gt;</code></td>
+<td><code>#include &lt;autoware/agnocast_wrapper/tf2.hpp&gt;</code></td>
+</tr>
+<tr>
+<td><code>#include &lt;tf2_ros/buffer.hpp&gt;</code></td>
+<td><code>#include &lt;autoware/agnocast_wrapper/tf2.hpp&gt;</code></td>
+</tr>
+<tr>
+<td><code>#include &lt;tf2_ros/transform_broadcaster.hpp&gt;</code></td>
+<td><code>#include &lt;autoware/agnocast_wrapper/tf2.hpp&gt;</code></td>
+</tr>
+<tr>
+<td><code>#include &lt;tf2_ros/static_transform_broadcaster.hpp&gt;</code></td>
+<td><code>#include &lt;autoware/agnocast_wrapper/tf2.hpp&gt;</code></td>
+</tr>
+<tr>
+<td><code>tf2_ros::TransformListener</code></td>
+<td><code>autoware::agnocast_wrapper::TransformListener</code></td>
+</tr>
+<tr>
+<td><code>tf2_ros::Buffer</code></td>
+<td><code>autoware::agnocast_wrapper::Buffer</code></td>
+</tr>
+<tr>
+<td><code>tf2_ros::TransformBroadcaster</code></td>
+<td><code>autoware::agnocast_wrapper::TransformBroadcaster</code></td>
+</tr>
+<tr>
+<td><code>tf2_ros::StaticTransformBroadcaster</code></td>
+<td><code>autoware::agnocast_wrapper::StaticTransformBroadcaster</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="diagnostic-updater-support">Diagnostic Updater Support<a class="headerlink" href="#diagnostic-updater-support" title="Permanent link">#</a></h2>
+<p>This package provides a wrapper <code>autoware::agnocast_wrapper::diagnostic_updater::Updater</code> for <code>diagnostic_updater::Updater</code>. The wrapper transparently switches between <code>diagnostic_updater::Updater</code> and <code>agnocast::Updater</code> at runtime, so nodes inheriting from <code>autoware::agnocast_wrapper::Node</code> can use the same idiom in both modes.</p>
+<p>The <code>diagnostic_updater.period</code> and <code>diagnostic_updater.use_fqn</code> parameters are declared identically in both modes, so behavior remains consistent.</p>
+<h3 id="current-limitations_1">Current limitations<a class="headerlink" href="#current-limitations_1" title="Permanent link">#</a></h3>
+<ul>
+<li>Only the <code>Updater(autoware::agnocast_wrapper::Node*, double)</code> constructor is supported. The upstream interface-pointer constructor and <code>Updater(NodeT, double)</code> template overload are intentionally hidden in both modes, so source code stays portable between agnocast-enabled and disabled builds.</li>
+<li>The wrapper does <strong>not</strong> inherit from <code>DiagnosticTaskVector</code>, so <code>getTasks()</code> is not available.</li>
+<li>The wrapper is non-copyable and non-movable; <code>verbose_</code> is bound by reference to the underlying impl.</li>
+</ul>
+<h3 id="usage-example_2">Usage example<a class="headerlink" href="#usage-example_2" title="Permanent link">#</a></h3>
+<p>```cpp</p>
+<h1 id="include_5">include <autoware agnocast_wrapper diagnostic_updater.hpp><a class="headerlink" href="#include_5" title="Permanent link">#</a></autoware></h1>
+<p>class MyNode : public autoware::agnocast_wrapper::Node
+{
+public:
+  explicit MyNode(const rclcpp::NodeOptions &amp; options)
+  : Node("my_node", options), updater_(this)
+  {
+    updater_.setHardwareID("my_hardware");
+    updater_.add("status", this, &amp;MyNode::diagnose);
+  }</p>
+<p>private:
+  void diagnose(diagnostic_updater::DiagnosticStatusWrapper &amp; stat) {
+    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "running");
+  }</p>
+<p>autoware::agnocast_wrapper::diagnostic_updater::Updater updater_;
+};
+```</p>
+<h3 id="migration-guide-from-diagnostic_updaterupdater">Migration guide (from <code>diagnostic_updater::Updater</code>)<a class="headerlink" href="#migration-guide-from-diagnostic_updaterupdater" title="Permanent link">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Before</th>
+<th>After</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>#include &lt;diagnostic_updater/diagnostic_updater.hpp&gt;</code></td>
+<td><code>#include &lt;autoware/agnocast_wrapper/diagnostic_updater.hpp&gt;</code></td>
+</tr>
+<tr>
+<td><code>diagnostic_updater::Updater updater_{this};</code></td>
+<td><code>autoware::agnocast_wrapper::diagnostic_updater::Updater updater_{this};</code></td>
+</tr>
+</tbody>
+</table>
+<p>The <code>add()</code> / <code>removeByName()</code> / <code>setHardwareID()</code> / <code>setHardwareIDf()</code> / <code>broadcast()</code> / <code>force_update()</code> / <code>setPeriod()</code> / <code>getPeriod()</code> APIs and the <code>verbose_</code> field behave the same as the upstream <code>diagnostic_updater::Updater</code>.</p>
+<blockquote>
+<p><strong>Note:</strong> <code>DiagnosticTask</code> subclasses (e.g. <code>FrequencyStatus</code>, <code>TimeStampStatus</code>, <code>Heartbeat</code>) defined in <code>diagnostic_updater</code> can be added via <code>updater_.add(task)</code> unchanged.</p>
+</blockquote>
 <h2 id="how-to-enabledisable-agnocast-on-build">How to Enable/Disable Agnocast on Build<a class="headerlink" href="#how-to-enabledisable-agnocast-on-build" title="Permanent link">#</a></h2>
 <p>To build Autoware <strong>with</strong> Agnocast:</p>
 <p><code>bash
@@ -7923,12 +8248,12 @@ unset ENABLE_AGNOCAST</p>
 <p><code>bash
 rm -Rf ./install/&lt;package_name&gt; ./build/&lt;package_name&gt;
 export ENABLE_AGNOCAST=0
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --package-select &lt;package_name&gt;</code></p>
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-select &lt;package_name&gt;</code></p>
 <p>To rebuild a specific package <strong>with</strong> Agnocast after it was previously built without it:</p>
 <p><code>bash
 rm -Rf ./install/&lt;package_name&gt; ./build/&lt;package_name&gt;
 export ENABLE_AGNOCAST=1
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --package-select &lt;package_name&gt;</code></p>
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-select &lt;package_name&gt;</code></p>
 <p>Please note that the <code>ENABLE_AGNOCAST</code> environment variable may not behave as expected in the following scenario:</p>
 <ul>
 <li>Package A depends on build artifacts from Package B</li>
@@ -7979,13 +8304,18 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --package
 <tbody>
 <tr>
 <td><code>agnocast_heaphook_path</code></td>
-<td><code>/opt/ros/humble/lib/libagnocast_heaphook.so</code></td>
+<td><code>/opt/ros/$ROS_DISTRO/lib/libagnocast_heaphook.so</code> (falls back to <code>humble</code>)</td>
 <td>Path to the heaphook shared library</td>
 </tr>
 <tr>
 <td><code>use_multithread</code></td>
 <td><code>false</code></td>
 <td>Use the multi-threaded component container (<code>component_container_mt</code>)</td>
+</tr>
+<tr>
+<td><code>use_agnocast</code></td>
+<td><code>$(env ENABLE_AGNOCAST 0)</code></td>
+<td>Per-node override (<code>1</code>/<code>0</code>). Usually left unset; defaults to the <code>ENABLE_AGNOCAST</code> environment variable</td>
 </tr>
 </tbody>
 </table>
@@ -8028,8 +8358,18 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --package
   <env name="LD_PRELOAD" value="$(var ld_preload_value)"></env>
 </node_container>
 ```</p>
+<p>Disabling Agnocast for a single include (debugging / emergency fallback):</p>
+<p>```xml
+<include file="$(find-pkg-share autoware_agnocast_wrapper)/launch/agnocast_env.launch.xml">
+  <arg name="use_agnocast" value="0"></arg>
+</include></p>
+<p><node pkg="my_package" exec="my_node" name="my_node">
+  <env name="LD_PRELOAD" value="$(var ld_preload_value)"></env>
+</node>
+```</p>
+<p>Even when the workspace is built with <code>ENABLE_AGNOCAST=1</code>, passing <code>use_agnocast</code> to a single include forces that node (or container) back to the plain <code>rclcpp</code> path without touching the rest of the launch tree. Use it to temporarily disable Agnocast for one node while debugging, or as an emergency fallback when a specific node misbehaves under Agnocast.</p>
 <h3 id="examples-python">Examples (Python)<a class="headerlink" href="#examples-python" title="Permanent link">#</a></h3>
-<p>A Python launch file (<code>agnocast_env.launch.py</code>) is also provided with the same functionality. It sets the same launch configurations (<code>ld_preload_value</code>, <code>container_package</code>, <code>container_executable</code>) that can be referenced via <code>LaunchConfiguration</code>.</p>
+<p>A Python launch file (<code>agnocast_env.launch.py</code>) is also provided with the same functionality. It accepts the same <code>use_agnocast</code> argument and sets the same launch configurations (<code>ld_preload_value</code>, <code>container_package</code>, <code>container_executable</code>) that can be referenced via <code>LaunchConfiguration</code>.</p>
 <p>Basic usage with a single node:</p>
 <p>```python
 from launch import LaunchDescription
@@ -8093,6 +8433,7 @@ return LaunchDescription([agnocast_env, container])
 </code></pre></div>
 
 <p>```</p>
+<p>The same <code>use_agnocast</code> override works here too, via <code>launch_arguments={"use_agnocast": "0"}.items()</code>.</p>
 <p>This ensures that only the intended nodes receive the heaphook, rather than all nodes in the launch tree.</p></div>
 
 
