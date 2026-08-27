@@ -76,6 +76,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -1420,6 +1421,152 @@ TEST(NdtScanMatcherCharacteristics, PublishedInitialPoseIsTheInterpolatedMidpoin
   EXPECT_GT(interpolated.pose.pose.position.x, map_center_x);
   EXPECT_LT(interpolated.pose.pose.position.x, map_center_x + newer_pose_delta_x);
   EXPECT_NEAR(interpolated.pose.pose.position.x, map_center_x + newer_pose_delta_x / 2.0, 1e-6);
+}
+
+// ---------------------------------------------------------------------------------------------
+// `ndt_align_srv`, the path `autoware_pose_initializer` drives. The only ones that construct a
+// `TreeStructuredParzenEstimator`, so which particles get drawn depends on how many searches ran
+// before -- nothing below reads a drawn value.
+// ---------------------------------------------------------------------------------------------
+
+/// @brief A harness with the map loaded and one scan stored, i.e. ready for `ndt_align_srv`.
+std::unique_ptr<NdtHarness> make_harness_ready_to_align(
+  std::vector<rclcpp::Parameter> extra_overrides = {})
+{
+  auto overrides = fast_align_overrides();
+  for (auto & parameter : extra_overrides) {
+    overrides.push_back(std::move(parameter));
+  }
+  auto harness = make_ready_harness(std::move(overrides));
+  if (!harness->ensure_map_loaded()) {
+    throw std::runtime_error("the stub map never loaded");
+  }
+
+  ScanDrive drive;
+  drive.initial_pose = InitialPoseSpec{};
+  if (!harness->drive_one_scan(drive).has_value()) {
+    throw std::runtime_error("no scan was stored, so `align_pose` would have nothing to match");
+  }
+  return harness;
+}
+
+/// The `reliable` flag is decided by the NVTL threshold, and only by it.
+///
+/// The whole align path is NVTL: each particle carries `nearest_voxel_transformation_likelihood`,
+/// the best is picked by it, and `reliable` compares that against the NVTL threshold. Consistent
+/// as it stands -- `converged_param_type` and the transform-probability threshold are read by
+/// `callback_sensor_points_main` and nowhere else, so there is nothing here to ignore.
+///
+/// Pinned as a change detector rather than as a defect. Unifying score selection across the two
+/// paths is a step this series plans, and it would make the align path honour
+/// `converged_param_type`: anyone running TRANSFORM_PROBABILITY would then have `reliable` judged
+/// by a threshold they never tuned. These two cases fail if that coupling appears.
+///
+/// This one shows the transform-probability threshold does not reach the flag; the one below shows
+/// the NVTL threshold does. Both hold `converged_param_type` at TRANSFORM_PROBABILITY and move
+/// only the thresholds. They are separate cases because neither is a precondition for the other,
+/// and an `ASSERT_*` in one must not skip it.
+TEST(NdtScanMatcherCharacteristics, ReliableIgnoresTheTransformProbabilityThreshold)
+{
+  // Arrange
+  // Unreachable TP threshold, reachable NVTL one. `0.0 < score` needs a strictly positive score;
+  // the search samples within ~1.5 m of the map center, so every particle lands on the cloud.
+  auto harness = make_harness_ready_to_align(
+    {rclcpp::Parameter("score_estimation.converged_param_type", 0),
+     rclcpp::Parameter("score_estimation.converged_param_transform_probability", never_reached),
+     rclcpp::Parameter(
+       "score_estimation.converged_param_nearest_voxel_transformation_likelihood", 0.0)});
+
+  // Act
+  const auto request = make_pose_at(harness->now(), map_center_x, map_center_y);
+  const auto response = harness->call_ndt_align(request);
+
+  // Assert
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->success);
+  EXPECT_TRUE(response->reliable);
+
+  // The header of a successful response, pinned where one is already available. Both reach the EKF:
+  // `pose_initializer` swaps only the covariance before publishing what it got back, so a stamp of
+  // `now()` instead of the request's would hand the filter a wrongly timed initial pose.
+  EXPECT_EQ(response->pose_with_covariance.header.frame_id, map_frame);
+  EXPECT_EQ(response->pose_with_covariance.header.stamp, request.header.stamp);
+}
+
+/// The other half of the case above: the NVTL threshold is the one `reliable` answers to.
+TEST(NdtScanMatcherCharacteristics, ReliableFollowsTheNvtlThreshold)
+{
+  // Arrange
+  // The thresholds swapped: only the NVTL one is now unreachable.
+  auto harness = make_harness_ready_to_align(
+    {rclcpp::Parameter("score_estimation.converged_param_type", 0),
+     rclcpp::Parameter("score_estimation.converged_param_transform_probability", 0.0),
+     rclcpp::Parameter(
+       "score_estimation.converged_param_nearest_voxel_transformation_likelihood", never_reached)});
+
+  // Act
+  const auto response =
+    harness->call_ndt_align(make_pose_at(harness->now(), map_center_x, map_center_y));
+
+  // Assert
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->success);
+  EXPECT_FALSE(response->reliable);
+}
+
+/// Aligning outside the map range fails, and reports three messages joined into one.
+///
+/// The key order is the sequence: the initial pose transforms, a rebuild is judged necessary, the
+/// pcd loader answers with nothing, the update fails, the map check finds no target and returns
+/// before the sensor-points check. That last absence is the witness for the short-circuit.
+///
+/// The verbatim message is the other half, and the reason this case exists at all:
+/// `update_level_and_message` joins with "; " in call order and keeps the highest level. No other
+/// case sees three messages accumulate, and a diagnostics-as-data extraction is exactly what
+/// changes it. The missing space in "that(1)" is the node's, and is pinned as found.
+///
+/// Not covered, despite the neighbouring `is_need_rebuild`: that the rebuild path wipes `ndt_ptr`
+/// before `update_ndt` can fail, so a failed load leaves a node that had a map with none. No map
+/// is ever loaded here — nothing publishes an initial pose, so `latest_ekf_position_` stays unset
+/// and the 1 Hz timer never runs — and measured, deleting the wipe keeps this case green. Pinning
+/// it needs a successful align first and a scan afterwards, which is a case of its own.
+TEST(NdtScanMatcherCharacteristics, AligningOutsideMapRangeFailsWithThreeJoinedMessages)
+{
+  // Arrange
+  // No map, no stored scan, not activated: the align path gates on none of those before the map
+  // check, and measured, adding any of them changes nothing here.
+  auto harness = make_ready_harness(fast_align_overrides());
+
+  harness->diag().mark(ndt_align_status);
+
+  // Act
+  const auto response =
+    harness->call_ndt_align(make_pose_at(harness->now(), -map_center_x, -map_center_y));
+
+  // Assert
+  ASSERT_TRUE(response.has_value());
+  EXPECT_FALSE(response->success);
+
+  const auto diag = harness->wait_for_diag_since_mark(ndt_align_status);
+  ASSERT_TRUE(diag.has_value());
+
+  EXPECT_EQ(diag->value("is_succeed_transform_initial_pose"), "True");
+  EXPECT_EQ(diag->value("is_need_rebuild"), "True");
+  EXPECT_EQ(diag->value("is_succeed_call_pcd_loader"), "True");
+  EXPECT_EQ(diag->value("maps_to_add_size"), "0");
+  EXPECT_EQ(diag->value("is_updated_map"), "False");
+  EXPECT_EQ(diag->value("is_set_map_points"), "False");
+  EXPECT_FALSE(diag->has_key("is_set_sensor_points"))
+    << "the map check no longer short-circuits the sensor-points check. keys: "
+    << ::testing::PrintToString(diag->keys_in_order());
+
+  EXPECT_EQ(diag->level(), level_error);
+  EXPECT_EQ(
+    diag->message(),
+    "update_ndt failed. If this happens with initial position estimation, make sure that(1) the "
+    "initial position matches the pcd map and (2) the map_loader is working properly.; "
+    "No InputTarget. Please check the map file and the map_loader service; "
+    "ndt_align_service is failed.");
 }
 
 }  // namespace
