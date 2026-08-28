@@ -115,11 +115,15 @@ inline pcl::PointCloud<pcl::PointXYZ> make_corner_cloud(
 // -------------------------------------------------------------------------------------- stimulus
 
 /// @brief A normal scan stamped at `stamp`: the corner cloud at 1 m spacing, 1,323 points.
+///
+/// The map is this cloud at (`map_center_x`, `map_center_y`), so a sensor at (100 + d, 100) sees
+/// it shifted by -d. `shift_x` / `shift_y` are that shift, in the sensor frame.
 inline sensor_msgs::msg::PointCloud2 make_scan_at(
-  const builtin_interfaces::msg::Time & stamp, const std::string & frame_id = sensor_frame)
+  const builtin_interfaces::msg::Time & stamp, const double shift_x = 0.0,
+  const double shift_y = 0.0, const std::string & frame_id = sensor_frame)
 {
   sensor_msgs::msg::PointCloud2 cloud;
-  pcl::toROSMsg(make_corner_cloud(scan_spacing), cloud);
+  pcl::toROSMsg(make_corner_cloud(scan_spacing, shift_x, shift_y), cloud);
   cloud.header.stamp = stamp;
   cloud.header.frame_id = frame_id;
   return cloud;

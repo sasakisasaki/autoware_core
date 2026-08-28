@@ -106,6 +106,7 @@ using ndt_test::scan_matching_status;
 using ndt_test::make_empty_scan;
 using ndt_test::make_near_field_scan;
 using ndt_test::make_pose_at;
+using ndt_test::make_scan_at;
 
 using Float32Stamped = autoware_internal_debug_msgs::msg::Float32Stamped;
 using Int32Stamped = autoware_internal_debug_msgs::msg::Int32Stamped;
@@ -1685,6 +1686,125 @@ TEST(NdtScanMatcherCharacteristics, AligningOutsideMapRangeFailsWithThreeJoinedM
     "initial position matches the pcd map and (2) the map_loader is working properly.; "
     "No InputTarget. Please check the map file and the map_loader service; "
     "ndt_align_service is failed.");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Typical operation on the shipped configuration. Every case above relaxes the thresholds that
+// follow CI load or geometry; these two leave them in force, and are the only ones that do.
+// ---------------------------------------------------------------------------------------------
+
+/// @brief The shipped configuration, with only `ndt.num_threads` pinned for determinism.
+std::vector<rclcpp::Parameter> shipped_config_overrides()
+{
+  return {rclcpp::Parameter("ndt.num_threads", 1)};
+}
+
+/// One scan, stationary at the map center, freshly loaded map: converges and reports OK with the
+/// shipped thresholds in force. Measured here: `execution_time` about 15 ms against 100, the scan
+/// delay about 5 ms against the 1 s timeout, `distance_initial_to_result` under 0.01 m against 3.
+TEST(NdtScanMatcherCharacteristics, TypicalScanUnderShippedConfigConvergesAndReportsOk)
+{
+  // Arrange
+  auto harness = make_ready_harness(shipped_config_overrides());
+
+  auto ndt_pose = harness->capture<geometry_msgs::msg::PoseStamped>("/ndt_pose");
+  ASSERT_TRUE(harness->ensure_map_loaded());
+
+  // Act
+  ScanDrive drive;
+  drive.initial_pose = InitialPoseSpec{};
+
+  const auto outcome = harness->drive_one_scan(drive);
+
+  // Assert
+  ASSERT_TRUE(outcome.has_value());
+  const auto & diag = outcome->diag;
+
+  constexpr double shipped_exe_time_limit_ms = 100.0;
+  constexpr double shipped_initial_to_result_limit_m = 3.0;
+  EXPECT_LT(diag.value_as_double("execution_time"), shipped_exe_time_limit_ms);
+  EXPECT_LT(diag.value_as_double("distance_initial_to_result"), shipped_initial_to_result_limit_m);
+  EXPECT_EQ(diag.value("skipping_publish_num"), "0");
+  EXPECT_EQ(diag.level(), level_ok) << "message was: " << diag.message();
+
+  ASSERT_TRUE(harness->wait_until([&] { return ndt_pose->count() >= 1; }, 5s));
+  EXPECT_EQ(ndt_pose->count(), 1U) << "scan drive attempt was " << outcome->attempt;
+}
+
+/// Six scans while the vehicle walks out to +25 m. The only case that drives more than one scan,
+/// and the walk crosses `dynamic_map_loading.update_distance`, so it is also the only one in which
+/// the timer queries the loader again -- through the incremental path, `need_rebuild` false, with
+/// the one cell already cached. The realistic answer is nothing new, and the map must survive it.
+/// The scan is shifted by minus the travelled distance -- a sensor at (100 + d, 100) sees the map
+/// shifted by -d -- so scan and map stay the same surfaces throughout.
+TEST(NdtScanMatcherCharacteristics, SteadyStateOperationKeepsPublishingThroughAnEmptyMapUpdate)
+{
+  // Arrange
+  constexpr int scan_count = 6;
+  constexpr double step_m = 5.0;  // reaches +25 m, past the 20 m update distance, inside the 50 m
+                                  // at which `out_of_map_range` would start warning
+  constexpr double shipped_initial_to_result_limit_m = 3.0;
+  constexpr double shipped_update_distance_m = 20.0;
+
+  auto harness = make_ready_harness(shipped_config_overrides());
+
+  auto ndt_pose = harness->capture<geometry_msgs::msg::PoseStamped>("/ndt_pose");
+  ASSERT_TRUE(harness->ensure_map_loaded());
+
+  // Act and Assert
+  // A stream, so each step is checked against the record it produced; the stream-level assertions
+  // follow the loop.
+  for (int i = 0; i < scan_count; ++i) {
+    const double travelled = step_m * static_cast<double>(i);
+    SCOPED_TRACE(
+      "scan " + std::to_string(i) + " at x = " + std::to_string(map_center_x + travelled));
+
+    ScanDrive drive;
+    InitialPoseSpec spec;
+    spec.x = map_center_x + travelled;
+    drive.initial_pose = spec;
+    drive.make_cloud = [travelled](const builtin_interfaces::msg::Time & stamp) {
+      return make_scan_at(stamp, -travelled, 0.0);
+    };
+
+    const auto outcome = harness->drive_one_scan(drive);
+    ASSERT_TRUE(outcome.has_value());
+    const auto & diag = outcome->diag;
+
+    EXPECT_EQ(diag.value("is_set_map_points"), "True");
+    EXPECT_EQ(diag.value("skipping_publish_num"), "0") << "message was: " << diag.message();
+    EXPECT_LT(
+      diag.value_as_double("distance_initial_to_result"), shipped_initial_to_result_limit_m);
+  }
+
+  // Assert
+  ASSERT_TRUE(
+    harness->wait_until([&] { return ndt_pose->count() >= static_cast<size_t>(scan_count); }, 10s))
+    << ndt_pose->count() << " of " << scan_count << " scans produced an ndt_pose";
+
+  // The walk crossed `update_distance`, so the timer queried the loader again. With the one cell
+  // already cached the realistic answer is nothing new, and the node has to keep the map it has.
+  std::vector<NdtHarness::Record> queries;
+  ASSERT_TRUE(harness->wait_until(
+    [&] {
+      queries.clear();
+      for (const auto & record : harness->diag().records(map_update_status)) {
+        if (record.has_key("is_need_rebuild")) {
+          queries.push_back(record);
+        }
+      }
+      return queries.size() >= 2U;
+    },
+    15s))
+    << "the timer never queried the loader a second time";
+  EXPECT_EQ(queries.front().value("is_need_rebuild"), "True");  // the initial load
+  const auto & second = queries.back();
+  EXPECT_GT(
+    second.value_as_double("distance_last_update_position_to_current_position"),
+    shipped_update_distance_m);
+  EXPECT_EQ(second.value("is_need_rebuild"), "False");
+  EXPECT_EQ(second.value("maps_to_add_size"), "0");
+  EXPECT_EQ(second.value("is_updated_map"), "False");
 }
 
 }  // namespace
