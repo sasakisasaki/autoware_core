@@ -102,6 +102,7 @@ using ndt_test::second_cell_x;
 using ndt_test::initial_pose_status;
 using ndt_test::map_update_status;
 using ndt_test::ndt_align_status;
+using ndt_test::regularization_pose_status;
 using ndt_test::scan_matching_status;
 
 using ndt_test::make_empty_scan;
@@ -2069,6 +2070,270 @@ TEST(NdtScanMatcherCharacteristics, WithoutAMapLoaderTheTimerWarnsOnceAndDoesNot
   ASSERT_TRUE(idle_tick.has_value());
   EXPECT_FALSE(idle_tick->has_key("is_need_rebuild"))
     << "keys: " << ::testing::PrintToString(idle_tick->keys_in_order());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Default-off paths inside `callback_sensor_points_main`. Off in the shipped yaml, so every case
+// above leaves them dark; the extraction moves them all the same.
+// ---------------------------------------------------------------------------------------------
+
+/// With `no_ground_points.enable`, three more topics carry the scan re-scored without its ground.
+///
+/// The filter keeps points more than `z_margin_for_ground_removal` above the result pose's z. The
+/// corner cloud has its z levels at whole metres and the result sits at z ~ 0, so a margin of 0.8
+/// keeps exactly the points off the floor; the expected count comes from the same generator, not a
+/// literal. Where the boundary itself falls is a unit test: a point at exactly the margin goes
+/// either way with the sign of a millimetre pose error. The two scores are pinned relative to the
+/// full scan's: identical values would mean the filter's output never reached the scorer.
+///
+/// One more thing rides on that count. The node fills the filtered cloud with `push_back` and never
+/// sets `width` or `height`, so `toROSMsg` derives them (`width = size`, `height = 1`) only because
+/// both are zero; a tidy-up that sets `height = 1` alone would publish `width = 0`.
+TEST(NdtScanMatcherCharacteristics, NoGroundScoringPublishesTheFilteredCloudAndItsTwoScores)
+{
+  // Arrange
+  constexpr double z_margin = 0.8;
+  auto overrides = converged_hot_path_overrides();
+  overrides.emplace_back("score_estimation.no_ground_points.enable", true);
+  overrides.emplace_back("score_estimation.no_ground_points.z_margin_for_ground_removal", z_margin);
+  auto harness = make_ready_harness(std::move(overrides));
+
+  auto points_aligned = harness->capture<sensor_msgs::msg::PointCloud2>("/points_aligned");
+  auto no_ground_points =
+    harness->capture<sensor_msgs::msg::PointCloud2>("/points_aligned_no_ground");
+  auto no_ground_tp = harness->capture<Float32Stamped>("/no_ground_transform_probability");
+  auto no_ground_nvtl =
+    harness->capture<Float32Stamped>("/no_ground_nearest_voxel_transformation_likelihood");
+  auto transform_probability = harness->capture<Float32Stamped>("/transform_probability");
+  auto nvtl = harness->capture<Float32Stamped>("/nearest_voxel_transformation_likelihood");
+  ASSERT_TRUE(wait_for_capture_discovery(
+    *harness, points_aligned, no_ground_points, no_ground_tp, no_ground_nvtl, transform_probability,
+    nvtl));
+  ASSERT_TRUE(harness->ensure_map_loaded());
+
+  // Act
+  ScanDrive drive;
+  drive.initial_pose = InitialPoseSpec{};
+
+  const auto outcome = harness->drive_one_scan(drive);
+
+  // Assert
+  ASSERT_TRUE(outcome.has_value());
+  ASSERT_EQ(outcome->diag.level(), level_ok)
+    << "scan did not converge: " << outcome->diag.message();
+
+  ASSERT_TRUE(harness->wait_until(
+    [&] {
+      return points_aligned->count() >= 1 && no_ground_points->count() >= 1 &&
+             no_ground_tp->count() >= 1 && no_ground_nvtl->count() >= 1 &&
+             transform_probability->count() >= 1 && nvtl->count() >= 1;
+    },
+    5s))
+    << "not every no-ground publication arrived";
+  EXPECT_EQ(no_ground_points->count(), 1U) << "scan drive attempt was " << outcome->attempt;
+  EXPECT_EQ(no_ground_tp->count(), 1U);
+  EXPECT_EQ(no_ground_nvtl->count(), 1U);
+
+  const auto aligned = points_aligned->first();
+  const auto filtered = no_ground_points->first();
+  ASSERT_TRUE(aligned.has_value() && filtered.has_value());
+  const auto scan = ndt_test::make_corner_cloud(ndt_test::scan_spacing);
+  const auto off_the_floor = std::count_if(
+    scan.points.begin(), scan.points.end(), [&](const auto & p) { return p.z > z_margin; });
+  EXPECT_EQ(filtered->width, static_cast<uint32_t>(off_the_floor));
+  EXPECT_LT(filtered->width, aligned->width);
+  EXPECT_EQ(filtered->header.frame_id, map_frame);
+  EXPECT_EQ(filtered->header.stamp, outcome->stamp);
+  EXPECT_EQ(no_ground_tp->first()->stamp, outcome->stamp);
+  EXPECT_EQ(no_ground_nvtl->first()->stamp, outcome->stamp);
+  // Different input, different value: were the filter's output not what reaches the scorer, the
+  // no-ground scores would be bit-identical to the full scan's.
+  EXPECT_GT(std::abs(no_ground_tp->first()->data - transform_probability->first()->data), 1.0e-6f);
+  EXPECT_GT(std::abs(no_ground_nvtl->first()->data - nvtl->first()->data), 1.0e-6f);
+}
+
+/// @brief Offset model shared by the two multi-NDT cases; its widest pair is 2 m apart.
+const std::vector<double> multi_offsets_x{0.0, 0.0, 0.5, -0.5, 1.0, -1.0};
+const std::vector<double> multi_offsets_y{0.5, -0.5, 0.0, 0.0, 0.0, 0.0};
+
+/// @brief Largest pairwise 2-D distance in a pose array. The node rotates the offsets into the
+/// result's frame, and rotation preserves distances, so this is exact where positions are not.
+double max_pairwise_distance(const geometry_msgs::msg::PoseArray & array)
+{
+  double result = 0.0;
+  for (size_t i = 0; i < array.poses.size(); ++i) {
+    for (size_t j = i + 1; j < array.poses.size(); ++j) {
+      const auto & a = array.poses[i].position;
+      const auto & b = array.poses[j].position;
+      result = std::max(result, std::hypot(a.x - b.x, a.y - b.y));
+    }
+  }
+  return result;
+}
+
+/// MULTI_NDT re-aligns from every offset in the model and publishes both pose arrays: the result
+/// itself, then one entry per offset.
+///
+/// The offsets are pinned by the case's own override, so the array size is a claim about the
+/// model's length rather than about the shipped yaml. Deterministic: the offsets are fixed and
+/// `num_threads` is 1, so no RNG is involved. The covariance itself is not asserted -- the four
+/// writes are the LAPLACE case's, and at the shipped scale the multi-NDT spread sits under the
+/// floor.
+TEST(NdtScanMatcherCharacteristics, MultiNdtCovarianceEstimationPublishesOneResultPerOffset)
+{
+  // Arrange
+  auto overrides = converged_hot_path_overrides();
+  overrides.emplace_back("covariance.covariance_estimation.covariance_estimation_type", 2);
+  overrides.emplace_back(
+    "covariance.covariance_estimation.initial_pose_offset_model_x", multi_offsets_x);
+  overrides.emplace_back(
+    "covariance.covariance_estimation.initial_pose_offset_model_y", multi_offsets_y);
+  auto harness = make_ready_harness(std::move(overrides));
+
+  auto multi_ndt_pose = harness->capture<geometry_msgs::msg::PoseArray>("/multi_ndt_pose");
+  auto multi_initial_pose = harness->capture<geometry_msgs::msg::PoseArray>("/multi_initial_pose");
+  ASSERT_TRUE(wait_for_capture_discovery(*harness, multi_ndt_pose, multi_initial_pose));
+  ASSERT_TRUE(harness->ensure_map_loaded());
+
+  // Act
+  ScanDrive drive;
+  drive.initial_pose = InitialPoseSpec{};
+
+  const auto outcome = harness->drive_one_scan(drive);
+
+  // Assert
+  ASSERT_TRUE(outcome.has_value());
+  ASSERT_EQ(outcome->diag.level(), level_ok)
+    << "scan did not converge: " << outcome->diag.message();
+
+  ASSERT_TRUE(harness->wait_until(
+    [&] { return multi_ndt_pose->count() >= 1 && multi_initial_pose->count() >= 1; }, 5s));
+  EXPECT_EQ(multi_ndt_pose->count(), 1U) << "scan drive attempt was " << outcome->attempt;
+  EXPECT_EQ(multi_initial_pose->count(), 1U);
+  const auto results = multi_ndt_pose->first();
+  const auto initials = multi_initial_pose->first();
+  ASSERT_TRUE(results.has_value() && initials.has_value());
+  EXPECT_EQ(results->poses.size(), multi_offsets_x.size() + 1);
+  EXPECT_EQ(initials->poses.size(), multi_offsets_x.size() + 1);
+  EXPECT_EQ(results->header.frame_id, map_frame);
+  // Which array is which: the initials sit the offsets apart, where the re-aligned results
+  // collapse toward one pose.
+  EXPECT_NEAR(max_pairwise_distance(*initials), 2.0, 1.0e-6);
+  EXPECT_LT(max_pairwise_distance(*results), 1.0);
+}
+
+/// MULTI_NDT_SCORE scores the offsets without re-aligning, and publishes only the initial poses.
+///
+/// The asymmetry with MULTI_NDT is the point: `multi_ndt_pose` stays silent because there are no
+/// re-aligned results to show. Its absence is asserted against a matched capture, behind each of
+/// two scans -- the second bounds the in-flight window a lone count cannot.
+TEST(NdtScanMatcherCharacteristics, MultiNdtScoreCovarianceEstimationPublishesOnlyTheInitialPoses)
+{
+  // Arrange
+  auto overrides = converged_hot_path_overrides();
+  overrides.emplace_back("covariance.covariance_estimation.covariance_estimation_type", 3);
+  overrides.emplace_back(
+    "covariance.covariance_estimation.initial_pose_offset_model_x", multi_offsets_x);
+  overrides.emplace_back(
+    "covariance.covariance_estimation.initial_pose_offset_model_y", multi_offsets_y);
+  auto harness = make_ready_harness(std::move(overrides));
+
+  auto multi_ndt_pose = harness->capture<geometry_msgs::msg::PoseArray>("/multi_ndt_pose");
+  auto multi_initial_pose = harness->capture<geometry_msgs::msg::PoseArray>("/multi_initial_pose");
+  auto points_aligned = harness->capture<sensor_msgs::msg::PointCloud2>("/points_aligned");
+  ASSERT_TRUE(
+    wait_for_capture_discovery(*harness, multi_ndt_pose, multi_initial_pose, points_aligned));
+  ASSERT_TRUE(harness->ensure_map_loaded());
+
+  // Act
+  ScanDrive drive;
+  drive.initial_pose = InitialPoseSpec{};
+
+  const auto outcome = harness->drive_one_scan(drive);
+
+  // Assert
+  ASSERT_TRUE(outcome.has_value());
+  ASSERT_EQ(outcome->diag.level(), level_ok)
+    << "scan did not converge: " << outcome->diag.message();
+
+  // `points_aligned` is the last unconditional publish, so the callback has run its course.
+  ASSERT_TRUE(harness->wait_until(
+    [&] { return multi_initial_pose->count() >= 1 && points_aligned->count() >= 1; }, 5s));
+  const auto initials = multi_initial_pose->first();
+  ASSERT_TRUE(initials.has_value());
+  EXPECT_EQ(initials->poses.size(), multi_offsets_x.size() + 1);
+  EXPECT_NEAR(max_pairwise_distance(*initials), 2.0, 1.0e-6);
+  EXPECT_EQ(multi_ndt_pose->count(), 0U);
+
+  // A wrongly published sample from this scan could still be in flight when `count()` reads 0; a
+  // second full callback bounds that window.
+  const auto second = harness->drive_one_scan(drive);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(harness->wait_until(
+    [&] { return multi_initial_pose->count() >= 2 && points_aligned->count() >= 2; }, 5s));
+  EXPECT_EQ(multi_ndt_pose->count(), 0U);
+}
+
+/// With `ndt.regularization.enable`, a sixth `/diagnostics` publisher appears and the
+/// regularization subscriber records one key per pose and validates nothing: a pose received while
+/// deactivated, in the wrong frame, is recorded like any other. The initial-pose subscriber beside
+/// it checks both.
+///
+/// Whether `align` then used the pose is invisible from here: `add_regularization_pose` unsets and
+/// re-sets it on the NDT object and nothing reports the outcome. That is a unit test on the
+/// extracted function. What is pinned is the subscriber's contract and that the enabled path
+/// still converges with the pair confirmed in the node's buffer before the scan goes out.
+TEST(NdtScanMatcherCharacteristics, RegularizationSubscriberRecordsOneKeyAndTheEnabledPathConverges)
+{
+  // Arrange
+  auto overrides = converged_hot_path_overrides();
+  overrides.emplace_back("ndt.regularization.enable", true);
+  auto harness = make_ready_harness(std::move(overrides));
+  ASSERT_TRUE(harness->wait_for_diagnostics_ready(6))
+    << "the regularization subscriber's diagnostics publisher never appeared";
+
+  // Direct evidence of "validates nothing": deactivated, wrong frame, still one clean record.
+  const auto unchecked = make_pose_at(harness->now(), map_center_x, map_center_y, base_link_frame);
+  ASSERT_TRUE(harness->publish_regularization_pose(unchecked));
+  const auto unchecked_record =
+    harness->wait_for_diag_stamp(regularization_pose_status, unchecked.header.stamp);
+  ASSERT_TRUE(unchecked_record.has_value());
+  EXPECT_EQ(unchecked_record->keys_in_order(), std::vector<std::string>{"topic_time_stamp"});
+  EXPECT_EQ(unchecked_record->level(), level_ok) << "message was: " << unchecked_record->message();
+
+  ASSERT_TRUE(harness->ensure_map_loaded());
+
+  // Act
+  // The pair sits 100 s either side of "now" (buffer limits: 1000 s): a retry's scan stamp lags
+  // wall time by up to attempts * timeout, and `interpolate` rejects a target older than the
+  // buffer's first entry, so a tight bracket would quietly leave the pose unset. The waits put
+  // both poses in the buffer before the scan goes out; nothing else orders the two callbacks.
+  builtin_interfaces::msg::Time older_stamp;
+  ScanDrive drive;
+  drive.initial_pose = InitialPoseSpec{};
+  drive.before_scan = [&] {
+    const auto now = harness->now();
+    const auto older = make_pose_at(now - rclcpp::Duration(100s), map_center_x, map_center_y);
+    const auto newer = make_pose_at(now + rclcpp::Duration(100s), map_center_x, map_center_y);
+    older_stamp = older.header.stamp;
+    EXPECT_TRUE(harness->publish_regularization_pose(older));
+    EXPECT_TRUE(harness->publish_regularization_pose(newer));
+    EXPECT_TRUE(
+      harness->wait_for_diag_stamp(regularization_pose_status, older.header.stamp).has_value());
+    EXPECT_TRUE(
+      harness->wait_for_diag_stamp(regularization_pose_status, newer.header.stamp).has_value());
+  };
+
+  const auto outcome = harness->drive_one_scan(drive);
+
+  // Assert
+  ASSERT_TRUE(outcome.has_value());
+  EXPECT_EQ(outcome->diag.level(), level_ok) << "message was: " << outcome->diag.message();
+
+  const auto record = harness->diag().find_by_stamp(regularization_pose_status, older_stamp);
+  ASSERT_TRUE(record.has_value());
+  EXPECT_EQ(record->keys_in_order(), std::vector<std::string>{"topic_time_stamp"});
+  EXPECT_EQ(record->level(), level_ok);
 }
 
 }  // namespace

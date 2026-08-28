@@ -45,8 +45,11 @@ inline constexpr const char * initial_pose_status =
   "ndt_scan_matcher: initial_pose_subscriber_status";
 inline constexpr const char * map_update_status = "ndt_scan_matcher: map_update_status";
 inline constexpr const char * ndt_align_status = "ndt_scan_matcher: ndt_align_service_status";
+inline constexpr const char * regularization_pose_status =
+  "ndt_scan_matcher: regularization_pose_subscriber_status";
 
-/// @brief The map is served by `StubMapLoader` centered here, so all valid poses sit at (100, 100).
+/// @brief Anchor of the stub's first cell, where every case that stays put sits. The walking
+/// cases range as far as x = 280, toward the second cell.
 inline constexpr double map_center_x = 100.0;
 inline constexpr double map_center_y = 100.0;
 

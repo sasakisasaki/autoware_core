@@ -358,6 +358,26 @@ public:
     initial_pose_pub_->publish(pose);
   }
 
+  /// @brief Publish a regularization pose. The node subscribes only with
+  /// `ndt.regularization.enable`, so the publisher is created on first use and waits for that
+  /// subscription to match.
+  bool publish_regularization_pose(
+    const geometry_msgs::msg::PoseWithCovarianceStamped & pose,
+    const std::chrono::nanoseconds timeout = 5s)
+  {
+    if (!regularization_pose_pub_) {
+      regularization_pose_pub_ =
+        observer_->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+          "/regularization_pose_with_covariance", 10);
+    }
+    if (!wait_until(
+          [&] { return regularization_pose_pub_->get_subscription_count() >= 1; }, timeout)) {
+      return false;
+    }
+    regularization_pose_pub_->publish(pose);
+    return true;
+  }
+
   void publish_scan(const sensor_msgs::msg::PointCloud2 & cloud) { scan_pub_->publish(cloud); }
 
   /// @brief Wait until the node has matched every publisher a test drives it through.
@@ -558,6 +578,8 @@ private:
   std::shared_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
+    regularization_pose_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr scan_pub_;
   rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr trigger_client_;
   rclcpp::Client<AlignService>::SharedPtr align_client_;
