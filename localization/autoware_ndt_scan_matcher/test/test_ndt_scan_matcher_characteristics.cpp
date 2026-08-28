@@ -1477,6 +1477,9 @@ TEST(NdtScanMatcherCharacteristics, ReliableIgnoresTheTransformProbabilityThresh
      rclcpp::Parameter(
        "score_estimation.converged_param_nearest_voxel_transformation_likelihood", 0.0)});
 
+  // The readying scan did not converge under this threshold, so the shared skip counter advanced.
+  const ScopeExit reset_skip_counter([&] { reset_skip_counter_via_deactivation(*harness); });
+
   // Act
   const auto request = make_pose_at(harness->now(), map_center_x, map_center_y);
   const auto response = harness->call_ndt_align(request);
@@ -1512,6 +1515,121 @@ TEST(NdtScanMatcherCharacteristics, ReliableFollowsTheNvtlThreshold)
   ASSERT_TRUE(response.has_value());
   ASSERT_TRUE(response->success);
   EXPECT_FALSE(response->reliable);
+}
+
+/// An align request whose frame has no transform to `map` is an ERROR, and nothing else runs.
+///
+/// The align-side twin of `ScanWithoutATransformIsAnError`; with it, every one of the node's six
+/// ERROR sites has a case. `absent("is_need_rebuild")` says the map module was never consulted.
+/// The frame is the one the catch's comment names from AWSIM's GNSS bug.
+TEST(NdtScanMatcherCharacteristics, AlignWithoutATransformIsAnError)
+{
+  // Arrange
+  auto harness = make_ready_harness(fast_align_overrides());
+  harness->diag().mark(ndt_align_status);
+
+  // Act
+  const auto response =
+    harness->call_ndt_align(make_pose_at(harness->now(), map_center_x, map_center_y, "gnss_link"));
+
+  // Assert
+  ASSERT_TRUE(response.has_value());
+  EXPECT_FALSE(response->success);
+
+  const auto diag = harness->wait_for_diag_since_mark(ndt_align_status);
+  ASSERT_TRUE(diag.has_value());
+  EXPECT_EQ(diag->value("is_succeed_transform_initial_pose"), "False");
+  EXPECT_EQ(diag->level(), level_error) << "message was: " << diag->message();
+  EXPECT_FALSE(diag->has_key("is_need_rebuild"))
+    << "the map module was consulted despite the failed transform. keys: "
+    << ::testing::PrintToString(diag->keys_in_order());
+}
+
+/// With a map but no stored scan, align fails after the map check.
+///
+/// The other half of `SensorPointsAreStoredEvenWhileDeactivated`, which pins that a scan received
+/// while deactivated is there for the aligner; this pins what happens when none ever arrived. The
+/// map check comes first, so `is_set_map_points` reads True; `absent("best_particle_score")` says
+/// the search never ran.
+TEST(NdtScanMatcherCharacteristics, AlignWithoutAStoredScanFailsAfterTheMapCheck)
+{
+  // Arrange
+  auto harness = make_ready_harness(fast_align_overrides());
+  ASSERT_TRUE(harness->ensure_map_loaded());  // activates and loads; drives no scan
+  harness->diag().mark(ndt_align_status);
+
+  // Act
+  const auto response =
+    harness->call_ndt_align(make_pose_at(harness->now(), map_center_x, map_center_y));
+
+  // Assert
+  ASSERT_TRUE(response.has_value());
+  EXPECT_FALSE(response->success);
+
+  const auto diag = harness->wait_for_diag_since_mark(ndt_align_status);
+  ASSERT_TRUE(diag.has_value());
+  EXPECT_EQ(diag->value("is_set_map_points"), "True");
+  EXPECT_EQ(diag->value("is_set_sensor_points"), "False");
+  EXPECT_EQ(diag->level(), level_warn);
+  EXPECT_FALSE(diag->has_key("best_particle_score"))
+    << "the search ran without a scan. keys: " << ::testing::PrintToString(diag->keys_in_order());
+}
+
+/// What a successful align records about itself: twelve keys, and one `points_aligned` per
+/// particle.
+///
+/// The align-side twin of `ScanMatchingStatusEmitsExactlyTheseNineteenKeys`, compared the same way.
+/// Six of the keys are the map module's: every align calls `update_map` directly, so with the map
+/// already loaded it takes the incremental path, asks the loader, and is told nothing is new. The
+/// cloud count is `particles_num`, pinned by the case's own override.
+TEST(NdtScanMatcherCharacteristics, SuccessfulAlignEmitsTheseKeysAndOneCloudPerParticle)
+{
+  // Arrange
+  constexpr int particles_num = 10;
+  auto harness = make_harness_ready_to_align(
+    {rclcpp::Parameter("initial_pose_estimation.particles_num", particles_num)});
+
+  // Created after the readying scan, so its cloud is not counted; matched before the align, so
+  // none of the align's are missed.
+  auto points_aligned = harness->capture<sensor_msgs::msg::PointCloud2>("/points_aligned");
+  ASSERT_TRUE(wait_for_capture_discovery(*harness, points_aligned));
+
+  harness->diag().mark(ndt_align_status);
+
+  // Act
+  const auto response =
+    harness->call_ndt_align(make_pose_at(harness->now(), map_center_x, map_center_y));
+
+  // Assert
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->success);
+
+  const auto diag = harness->wait_for_diag_since_mark(ndt_align_status);
+  ASSERT_TRUE(diag.has_value());
+  const std::vector<std::string> expected_keys{
+    "service_call_time_stamp",
+    "is_succeed_transform_initial_pose",
+    "is_need_rebuild",
+    "maps_size_before",
+    "is_succeed_call_pcd_loader",
+    "maps_to_add_size",
+    "maps_to_remove_size",
+    "is_updated_map",
+    "is_set_map_points",
+    "is_set_sensor_points",
+    "best_particle_score",
+    "is_succeed_service",
+  };
+  auto sorted = [](std::vector<std::string> keys) {
+    std::sort(keys.begin(), keys.end());
+    return keys;
+  };
+  EXPECT_EQ(sorted(diag->keys_in_order()), sorted(expected_keys));
+  EXPECT_EQ(diag->level(), level_ok) << "message was: " << diag->message();
+
+  ASSERT_TRUE(harness->wait_until(
+    [&] { return points_aligned->count() >= static_cast<size_t>(particles_num); }, 5s));
+  EXPECT_EQ(points_aligned->count(), static_cast<size_t>(particles_num));
 }
 
 /// Aligning outside the map range fails, and reports three messages joined into one.
