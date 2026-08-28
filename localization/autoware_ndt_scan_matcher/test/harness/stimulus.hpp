@@ -50,6 +50,10 @@ inline constexpr const char * ndt_align_status = "ndt_scan_matcher: ndt_align_se
 inline constexpr double map_center_x = 100.0;
 inline constexpr double map_center_y = 100.0;
 
+/// @brief Anchor of the stub's second cell. Placed where only the cell-boundary walk can reach it;
+/// `StubMapLoader` says why it must not move closer.
+inline constexpr double second_cell_x = 300.0;
+
 // ------------------------------------------------------------------------------- world geometry
 
 /// @brief Edge length [m] of the box whose corner is the only shape in this world.

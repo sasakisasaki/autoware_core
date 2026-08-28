@@ -97,6 +97,7 @@ using ndt_test::map_center_x;
 using ndt_test::map_center_y;
 using ndt_test::map_frame;
 using ndt_test::ndt_base_link_frame;
+using ndt_test::second_cell_x;
 
 using ndt_test::initial_pose_status;
 using ndt_test::map_update_status;
@@ -1805,6 +1806,269 @@ TEST(NdtScanMatcherCharacteristics, SteadyStateOperationKeepsPublishingThroughAn
   EXPECT_EQ(second.value("is_need_rebuild"), "False");
   EXPECT_EQ(second.value("maps_to_add_size"), "0");
   EXPECT_EQ(second.value("is_updated_map"), "False");
+}
+
+// ---------------------------------------------------------------------------------------------
+// `MapUpdateModule`: what the timer does with the loader's answers. The stub serves two cells so a
+// walk can cross a boundary; its docstring says where the second one has to sit.
+// ---------------------------------------------------------------------------------------------
+
+/// @brief How many times the timer has gone on to query the loader.
+///
+/// `is_need_rebuild` is the first key `update_map_internal` adds, so its presence marks a record
+/// where `should_update_map` returned true; ticks that only measured the distance lack it.
+size_t loader_query_count(NdtHarness & harness)
+{
+  size_t count = 0;
+  for (const auto & record : harness.diag().records(map_update_status)) {
+    count += record.has_key("is_need_rebuild") ? 1U : 0U;
+  }
+  return count;
+}
+
+/// Walking across a cell boundary adds the next cell, swaps it in, and drops the one left behind,
+/// with the scan stream converging throughout.
+///
+/// Steps of 45 m keep every query on the incremental path: past `update_distance` (20), inside
+/// `map_radius - lidar_radius` (50). From 100, the query at 145 finds nothing new; 190 brings cell
+/// "1" into the circle and is the double-buffer handover; 235 finds nothing new; 280 puts cell
+/// "0"'s anchor outside and removes it. Each scan is the corner of the nearer cell, so it always
+/// has a target, and each step waits for the timer to have seen it so no two steps merge into one
+/// jump.
+TEST(NdtScanMatcherCharacteristics, WalkAcrossACellBoundaryKeepsConvergingThroughAddAndRemove)
+{
+  // Arrange
+  constexpr double step_m = 45.0;
+  constexpr int scan_count = 5;  // x = 100, 145, 190, 235, 280
+
+  auto harness = make_ready_harness(shipped_config_overrides());
+  auto ndt_pose = harness->capture<geometry_msgs::msg::PoseStamped>("/ndt_pose");
+  ASSERT_TRUE(harness->ensure_map_loaded());
+  const size_t queries_before = loader_query_count(*harness);
+
+  // Act and Assert
+  for (int i = 0; i < scan_count; ++i) {
+    const double x = map_center_x + step_m * static_cast<double>(i);
+    SCOPED_TRACE("scan " + std::to_string(i) + " at x = " + std::to_string(x));
+    const double nearer_anchor_x =
+      (x <= (map_center_x + second_cell_x) / 2.0) ? map_center_x : second_cell_x;
+
+    ScanDrive drive;
+    InitialPoseSpec spec;
+    spec.x = x;
+    drive.initial_pose = spec;
+    drive.make_cloud = [nearer_anchor_x, x](const builtin_interfaces::msg::Time & stamp) {
+      return make_scan_at(stamp, nearer_anchor_x - x, 0.0);
+    };
+
+    const auto outcome = harness->drive_one_scan(drive);
+    ASSERT_TRUE(outcome.has_value());
+    EXPECT_EQ(outcome->diag.value("is_set_map_points"), "True");
+    EXPECT_EQ(outcome->diag.value("skipping_publish_num"), "0")
+      << "message was: " << outcome->diag.message();
+
+    // Every step but the first is a query; let the timer see this one before moving on.
+    const size_t expected_queries = queries_before + static_cast<size_t>(i);
+    ASSERT_TRUE(
+      harness->wait_until([&] { return loader_query_count(*harness) >= expected_queries; }, 5s));
+  }
+  ASSERT_TRUE(
+    harness->wait_until([&] { return ndt_pose->count() >= static_cast<size_t>(scan_count); }, 5s))
+    << ndt_pose->count() << " of " << scan_count << " scans produced an ndt_pose";
+
+  // The updates that changed the map: the initial rebuild, the add, the remove.
+  std::vector<NdtHarness::Record> updates;
+  ASSERT_TRUE(harness->wait_until(
+    [&] {
+      updates.clear();
+      for (const auto & record : harness->diag().records(map_update_status)) {
+        if (record.value("is_updated_map") == "True") {
+          updates.push_back(record);
+        }
+      }
+      return updates.size() >= 3U;
+    },
+    5s))
+    << updates.size() << " updates changed the map";
+  ASSERT_EQ(updates.size(), 3U);
+  EXPECT_EQ(updates[0].value("is_need_rebuild"), "True");
+  EXPECT_EQ(updates[1].value("is_need_rebuild"), "False");
+  EXPECT_EQ(updates[1].value("maps_to_add_size"), "1");
+  EXPECT_EQ(updates[1].value("maps_size_after"), "2");
+  EXPECT_EQ(updates[2].value("is_need_rebuild"), "False");
+  EXPECT_EQ(updates[2].value("maps_to_remove_size"), "1");
+  EXPECT_EQ(updates[2].value("maps_size_after"), "1");
+}
+
+/// `update_distance` is a strict boundary: exactly 20.0 m from the last load the timer does not
+/// query, 20.001 m away it does.
+///
+/// 120.0 - 100.0 is exact in double, so the equality case is deterministic. The distance the timer
+/// computed is on its record either way; `is_need_rebuild` appears only when it went on to query.
+TEST(NdtScanMatcherCharacteristics, UpdateDistanceIsAStrictBoundary)
+{
+  // Arrange
+  auto harness = make_ready_harness(shipped_config_overrides());
+  ASSERT_TRUE(harness->ensure_map_loaded());
+
+  // Act
+  ASSERT_TRUE(harness->publish_initial_pose_and_confirm(
+    make_pose_at(harness->now(), map_center_x + 20.0, map_center_y)));
+
+  // Assert
+  const auto at_boundary = harness->wait_for_diag(
+    map_update_status,
+    [](const NdtHarness::Record & record) {
+      return record.value_as_double("distance_last_update_position_to_current_position") == 20.0;
+    },
+    5s);
+  ASSERT_TRUE(at_boundary.has_value());
+  EXPECT_FALSE(at_boundary->has_key("is_need_rebuild"))
+    << "the timer queried at exactly update_distance. keys: "
+    << ::testing::PrintToString(at_boundary->keys_in_order());
+
+  ASSERT_TRUE(harness->publish_initial_pose_and_confirm(
+    make_pose_at(harness->now(), map_center_x + 20.001, map_center_y)));
+  const auto past_boundary = harness->wait_for_diag(
+    map_update_status,
+    [](const NdtHarness::Record & record) { return record.value("is_need_rebuild") == "False"; },
+    5s);
+  ASSERT_TRUE(past_boundary.has_value());
+  EXPECT_GT(
+    past_boundary->value_as_double("distance_last_update_position_to_current_position"), 20.0);
+}
+
+/// A failed load is not retried until the vehicle has moved `update_distance`.
+///
+/// A failed rebuild records its position like a successful one (`map_update_module.cpp:176`), so
+/// `should_update_map` sees distance 0 on every following tick. `need_rebuild` stays set, so the
+/// query that finally comes is a rebuild again. Starting with the EKF pose off the map therefore
+/// costs one attempt per `update_distance` of travel, not one per second.
+TEST(NdtScanMatcherCharacteristics, FailedLoadIsNotRetriedUntilTheVehicleMovesUpdateDistance)
+{
+  // Arrange
+  auto harness = make_ready_harness();
+  ASSERT_EQ(harness->activate(), std::optional<bool>(true));
+
+  // Act
+  ASSERT_TRUE(harness->publish_initial_pose_and_confirm(
+    make_pose_at(harness->now(), -map_center_x, -map_center_y)));
+  ASSERT_TRUE(harness->wait_until([&] { return loader_query_count(*harness) >= 1U; }, 5s));
+
+  // Assert
+  // The next tick measures 0 m from the recorded position and does not query ...
+  const auto idle_tick = harness->wait_for_diag(
+    map_update_status,
+    [](const NdtHarness::Record & record) {
+      return record.value_as_double("distance_last_update_position_to_current_position") == 0.0;
+    },
+    5s);
+  ASSERT_TRUE(idle_tick.has_value());
+  EXPECT_FALSE(idle_tick->has_key("is_need_rebuild"))
+    << "keys: " << ::testing::PrintToString(idle_tick->keys_in_order());
+  // ... and moving past `update_distance` brings one, still a rebuild, still failing.
+  ASSERT_TRUE(harness->publish_initial_pose_and_confirm(
+    make_pose_at(harness->now(), -map_center_x + 21.0, -map_center_y)));
+  ASSERT_TRUE(harness->wait_until([&] { return loader_query_count(*harness) >= 2U; }, 5s));
+  std::optional<NdtHarness::Record> retry;
+  for (const auto & record : harness->diag().records(map_update_status)) {
+    if (record.has_key("is_need_rebuild")) {
+      retry = record;
+    }
+  }
+  ASSERT_TRUE(retry.has_value());
+  EXPECT_EQ(retry->value("is_need_rebuild"), "True");
+  EXPECT_EQ(retry->value("is_updated_map"), "False");
+}
+
+/// SUSPICIOUS — an align request far outside the loaded map removes the map, and the tick after it
+/// raises a "not keeping up" ERROR for a vehicle that has not moved.
+///
+/// The service calls `update_map` directly, so the request position drives a differential query:
+/// the loaded cell's anchor is outside a circle centred 283 m away and comes back in
+/// `ids_to_remove`; the update succeeds, the map is empty, the align fails on it, and the request
+/// position is recorded as the last load. On the next tick the EKF position is 283 m from that --
+/// the ERROR, `need_rebuild`, and a rebuild that puts the cell back. Two effects of one failed
+/// request: the map is gone until re-activation plus a tick (production calls the service while
+/// deactivated, and the timer waits for activation), and monitoring sees a false alarm. The
+/// natural fix -- load into a scratch NDT and swap only on success -- changes both, so they are
+/// pinned as they are.
+TEST(NdtScanMatcherCharacteristics, FarAlignRequestRemovesTheLoadedCellUntilTheTimerReloadsIt)
+{
+  // Arrange
+  auto harness = make_ready_harness(fast_align_overrides());
+  ASSERT_TRUE(harness->ensure_map_loaded());
+  harness->diag().mark(ndt_align_status);
+
+  // Act
+  const auto response =
+    harness->call_ndt_align(make_pose_at(harness->now(), -map_center_x, -map_center_y));
+
+  // Assert
+  ASSERT_TRUE(response.has_value());
+  EXPECT_FALSE(response->success);
+
+  const auto diag = harness->wait_for_diag_since_mark(ndt_align_status);
+  ASSERT_TRUE(diag.has_value());
+  EXPECT_EQ(diag->value("is_need_rebuild"), "False");
+  EXPECT_EQ(diag->value("maps_to_remove_size"), "1");
+  EXPECT_EQ(diag->value("is_updated_map"), "True");
+  EXPECT_EQ(diag->value("maps_size_after"), "0");
+  EXPECT_EQ(diag->value("is_set_map_points"), "False");
+  EXPECT_EQ(diag->level(), level_warn) << "message was: " << diag->message();
+
+  const auto reload = harness->wait_for_diag(
+    map_update_status,
+    [](const NdtHarness::Record & record) {
+      return record.level() == level_error && record.value("is_updated_map") == "True";
+    },
+    5s);
+  ASSERT_TRUE(reload.has_value());
+  EXPECT_EQ(reload->value("is_need_rebuild"), "True");
+  EXPECT_EQ(reload->value("maps_size_after"), "1");
+}
+
+/// Without a map loader the timer reports one failed attempt and does not spin retrying.
+///
+/// `update_ndt` gives the service a second to appear, then reports `is_succeed_call_pcd_loader:
+/// False` with a WARN and returns; the rebuild that called it turns that into the ERROR, records
+/// the position, and -- as after any failed load -- does not try again until the vehicle moves
+/// `update_distance`. The timer callback blocks for that second on each attempt. The message is
+/// asserted despite the key: `is_succeed_call_pcd_loader: False` is shared with the
+/// `!rclcpp::ok()` branch, and only the text says which one fired.
+TEST(NdtScanMatcherCharacteristics, WithoutAMapLoaderTheTimerWarnsOnceAndDoesNotLoad)
+{
+  // Arrange
+  auto harness =
+    std::make_unique<NdtHarness>(std::vector<rclcpp::Parameter>{}, /*with_map_loader=*/false);
+  ASSERT_TRUE(harness->wait_for_diagnostics_ready());
+  ASSERT_TRUE(harness->wait_for_stimulus_discovery());
+  ASSERT_EQ(harness->activate(), std::optional<bool>(true));
+
+  // Act
+  ASSERT_TRUE(harness->publish_initial_pose_and_confirm(
+    make_pose_at(harness->now(), map_center_x, map_center_y)));
+
+  // Assert
+  const auto attempt = harness->wait_for_diag(
+    map_update_status,
+    [](const NdtHarness::Record & record) { return record.has_key("is_need_rebuild"); }, 5s);
+  ASSERT_TRUE(attempt.has_value());
+  EXPECT_EQ(attempt->value("is_need_rebuild"), "True");
+  EXPECT_EQ(attempt->value("is_succeed_call_pcd_loader"), "False");
+  EXPECT_EQ(attempt->value("is_updated_map"), "False");
+  EXPECT_EQ(attempt->level(), level_error) << "message was: " << attempt->message();
+  EXPECT_TRUE(contains(attempt->message(), "Waiting for pcd loader service"))
+    << "message was: " << attempt->message();
+  const auto idle_tick = harness->wait_for_diag(
+    map_update_status,
+    [](const NdtHarness::Record & record) {
+      return record.value_as_double("distance_last_update_position_to_current_position") == 0.0;
+    },
+    5s);
+  ASSERT_TRUE(idle_tick.has_value());
+  EXPECT_FALSE(idle_tick->has_key("is_need_rebuild"))
+    << "keys: " << ::testing::PrintToString(idle_tick->keys_in_order());
 }
 
 }  // namespace
