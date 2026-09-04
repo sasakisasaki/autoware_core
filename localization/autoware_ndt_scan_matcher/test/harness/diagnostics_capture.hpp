@@ -32,27 +32,17 @@
 namespace ndt_test
 {
 
-/// @brief Records everything published on `/diagnostics`, indexed by `status[0].name`.
+/// Records everything published on `/diagnostics`, indexed by `status[0].name`.
 ///
-/// `ndt_scan_matcher` writes nearly every intermediate decision of its callbacks into
-/// diagnostics key-values, which makes `/diagnostics` the primary observable surface for
-/// characterizing the node. Two properties of `DiagnosticsInterface` are load-bearing here
-/// and are relied upon by the assertions:
-///   - values are stringified with `std::to_string`, and bools become "True"/"False";
-///   - `values` preserves *insertion* order, so the key order witnesses the code path taken.
-///
-/// The subscription uses `KeepAll().reliable()` because every `DiagnosticsInterface`
-/// publishes with a volatile `QoS(10)`; a shallower or later subscription silently loses
-/// messages.
+/// The assertions rely on two details of `DiagnosticsInterface`: values become strings via
+/// `std::to_string`, with bools as "True"/"False", and `values` keeps insertion order, so the key
+/// order shows which path ran. The subscription is `KeepAll().reliable()` because the node
+/// publishes with a volatile `QoS(10)`, which a shallower subscription would drop.
 class DiagnosticsCapture
 {
 public:
-  /// @brief One captured `DiagnosticArray` (the node only ever puts one status in each).
-  ///
-  /// Which accessor to read a value with is not free. Equality goes through `value()` and compares
-  /// strings: a missing key gives `""`, which never equals a non-empty expected value. Order goes
-  /// through `value_as_double()`: on a missing key `"" != "0"` would pass, while NaN fails any
-  /// comparison. Both directions leave a vanished key failing rather than quietly satisfied.
+  /// One captured `DiagnosticArray`. Use `value()` for equality and `value_as_double()` for
+  /// ordering: a missing key gives "" for the first and NaN for the second, so both fail.
   class Record
   {
   public:
@@ -63,7 +53,7 @@ public:
     {
     }
 
-    /// @brief Keys in the order `DiagnosticsInterface::add_key_value` inserted them.
+    /// Keys in the order `DiagnosticsInterface::add_key_value` inserted them.
     [[nodiscard]] std::vector<std::string> keys_in_order() const
     {
       std::vector<std::string> keys;
@@ -81,7 +71,7 @@ public:
       });
     }
 
-    /// @brief The raw (stringified) value, or "" when the key is absent.
+    /// The raw (stringified) value, or "" when the key is absent.
     [[nodiscard]] std::string value(const std::string & key) const
     {
       const auto it = std::find_if(
@@ -90,11 +80,7 @@ public:
       return (it == status_.values.end()) ? std::string{} : it->value;
     }
 
-    /// @brief Parsed value, or NaN when the key is absent, so a missing key fails the comparison
-    /// it was used in rather than throwing out of `std::stod`.
-    ///
-    /// Not for `topic_time_stamp`, which is `rclcpp::Time::nanoseconds()` -- an `int64_t` around
-    /// 1.8e18, past the 2^53 where `double` stops holding integers exactly.
+    /// Parsed value, or NaN when the key is absent. Not for `topic_time_stamp`, which is too large.
     [[nodiscard]] double value_as_double(const std::string & key) const
     {
       return has_key(key) ? std::stod(value(key)) : std::numeric_limits<double>::quiet_NaN();
@@ -109,7 +95,7 @@ public:
     builtin_interfaces::msg::Time stamp_{};
   };
 
-  /// @param observer Node that owns the subscription. Must be spun by the caller.
+  /// `observer` owns the subscription and must be spun by the caller.
   explicit DiagnosticsCapture(rclcpp::Node * observer)
   {
     subscription_ = observer->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
@@ -117,9 +103,7 @@ public:
       [this](diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr msg) { on_message(*msg); });
   }
 
-  /// @brief Readiness predicate: each `DiagnosticsInterface` creates its own `/diagnostics`
-  /// publisher, so the node under test contributes a known, fixed number of them. Waiting on
-  /// this count is an exact discovery gate that needs no sleeping.
+  /// Publisher count, used as the discovery gate: one publisher per `DiagnosticsInterface`.
   [[nodiscard]] size_t publisher_count() const { return subscription_->get_publisher_count(); }
 
   [[nodiscard]] std::vector<Record> records(const std::string & status_name) const
@@ -136,9 +120,7 @@ public:
     return (it == records_.end()) ? 0U : it->second.size();
   }
 
-  /// @brief Remember the current record count, so `newest_since_mark` can pick up only what
-  /// arrives afterwards. Needed for the three service/timer statuses, which are stamped with
-  /// `now()` and therefore cannot be correlated by an input stamp.
+  /// Remembers the current count, so `newest_since_mark` sees only what arrives after it.
   void mark(const std::string & status_name) { marks_[status_name] = count(status_name); }
 
   [[nodiscard]] std::optional<Record> newest_since_mark(const std::string & status_name) const
@@ -151,12 +133,7 @@ public:
     return all.back();
   }
 
-  /// @brief Find the record whose `header.stamp` equals `stamp`.
-  ///
-  /// `scan_matching_status`, `initial_pose_subscriber_status` and
-  /// `regularization_pose_subscriber_status` are published with the *input message* stamp, so a
-  /// unique input stamp identifies its resulting diagnostics record exactly. This is what lets
-  /// the suite correlate cause and effect instead of waiting a fixed duration and hoping.
+  /// Finds the record whose `header.stamp` equals `stamp`, which identifies it exactly.
   [[nodiscard]] std::optional<Record> find_by_stamp(
     const std::string & status_name, const builtin_interfaces::msg::Time & stamp) const
   {

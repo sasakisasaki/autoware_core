@@ -35,11 +35,10 @@ namespace ndt_test
 inline constexpr const char * map_frame = "map";
 inline constexpr const char * base_link_frame = "base_link";
 inline constexpr const char * sensor_frame = "sensor_frame";
-/// The child frame the node broadcasts its result on. Matches `frame.ndt_base_frame`, which the
-/// converged cases pin explicitly.
+/// The child frame the node broadcasts its result on. Matches `frame.ndt_base_frame`.
 inline constexpr const char * ndt_base_link_frame = "ndt_base_link";
 
-/// @brief Diagnostic status names published by the node under test.
+/// Diagnostic status names published by the node under test.
 inline constexpr const char * scan_matching_status = "ndt_scan_matcher: scan_matching_status";
 inline constexpr const char * initial_pose_status =
   "ndt_scan_matcher: initial_pose_subscriber_status";
@@ -48,28 +47,25 @@ inline constexpr const char * ndt_align_status = "ndt_scan_matcher: ndt_align_se
 inline constexpr const char * regularization_pose_status =
   "ndt_scan_matcher: regularization_pose_subscriber_status";
 
-/// @brief Anchor of the stub's first cell, where every case that stays put sits. The walking
-/// cases range as far as x = 280, toward the second cell.
+/// Anchor of the stub's first cell, where every test that stays put sits.
 inline constexpr double map_center_x = 100.0;
 inline constexpr double map_center_y = 100.0;
 
-/// @brief Anchor of the stub's second cell. Placed where only the cell-boundary walk can reach it;
-/// `StubMapLoader` says why it must not move closer.
+/// Anchor of the stub's second cell, placed where only the boundary-crossing test reaches it.
 inline constexpr double second_cell_x = 300.0;
 
 // ------------------------------------------------------------------------------- world geometry
 
-/// @brief Edge length [m] of the box whose corner is the only shape in this world.
+/// Edge length [m] of the box whose corner is the only shape in this world.
 inline constexpr double box_edge_length = 20.0;
 
-/// @brief Point spacing [m] of the map served by `StubMapLoader`.
+/// Point spacing [m] of the map served by `StubMapLoader`.
 inline constexpr double map_spacing = 0.2;
 
-/// @brief Point spacing [m] of a scan. An exact multiple of `map_spacing`, so every scan point
-/// coincides with a map point once the scan is placed at the map center.
+/// Point spacing [m] of a scan. A multiple of `map_spacing`, so scan points meet map points.
 inline constexpr double scan_spacing = 1.0;
 
-/// @brief Three faces of a box meeting at one corner — the single shape this suite is built from.
+/// Three faces of a box meeting at one corner — the single shape this suite is built from.
 ///
 /// Both the scan and the map are this cloud: the scan at the origin of `base_link`, the map
 /// translated to (`map_center_x`, `map_center_y`). One generator for both is what makes them lie
@@ -121,10 +117,7 @@ inline pcl::PointCloud<pcl::PointXYZ> make_corner_cloud(
 
 // -------------------------------------------------------------------------------------- stimulus
 
-/// @brief A normal scan stamped at `stamp`: the corner cloud at 1 m spacing, 1,323 points.
-///
-/// The map is this cloud at (`map_center_x`, `map_center_y`), so a sensor at (100 + d, 100) sees
-/// it shifted by -d. `shift_x` / `shift_y` are that shift, in the sensor frame.
+/// A normal scan at `stamp`. `shift_x` / `shift_y` move it in the sensor frame.
 inline sensor_msgs::msg::PointCloud2 make_scan_at(
   const builtin_interfaces::msg::Time & stamp, const double shift_x = 0.0,
   const double shift_y = 0.0, const std::string & frame_id = sensor_frame)
@@ -136,10 +129,7 @@ inline sensor_msgs::msg::PointCloud2 make_scan_at(
   return cloud;
 }
 
-/// @brief A well-formed but point-less cloud (`width == 0`).
-///
-/// The node reads `msg->width` and returns before `pcl::fromROSMsg`, so the payload is never
-/// parsed; only the header and `width` matter.
+/// A well-formed but point-less cloud. The node reads `width` and returns before parsing.
 inline sensor_msgs::msg::PointCloud2 make_empty_scan(
   const builtin_interfaces::msg::Time & stamp, const std::string & frame_id = sensor_frame)
 {
@@ -154,10 +144,7 @@ inline sensor_msgs::msg::PointCloud2 make_empty_scan(
   return cloud;
 }
 
-/// @brief Eight points on the corners of a 1 m cube, so the farthest is ~0.866 m.
-///
-/// That is below `sensor_points.required_distance` (10 m), which is what the near-field gate
-/// rejects.
+/// Eight points on a 1 m cube, so the farthest is about 0.866 m, below `required_distance`.
 inline sensor_msgs::msg::PointCloud2 make_near_field_scan(
   const builtin_interfaces::msg::Time & stamp, const std::string & frame_id = sensor_frame)
 {
@@ -178,10 +165,7 @@ inline sensor_msgs::msg::PointCloud2 make_near_field_scan(
   return cloud;
 }
 
-/// @brief An EKF-like initial pose, with an isotropic xy variance.
-///
-/// `align_pose` takes the square roots of the covariance diagonal as the standard deviations of its
-/// initial-pose search, so this covariance is what decides how widely `ndt_align_srv` looks.
+/// An EKF-like initial pose. `align_pose` uses the covariance diagonal as the search deviations.
 inline geometry_msgs::msg::PoseWithCovarianceStamped make_pose_at(
   const builtin_interfaces::msg::Time & stamp, const double x, const double y,
   const std::string & frame_id = map_frame)

@@ -26,21 +26,15 @@
 namespace ndt_test
 {
 
-/// @brief Records every message seen on one topic.
+/// Records every message seen on one topic.
 ///
-/// `KeepAll().reliable()` is deliberate: several assertions count messages (for example
-/// "published exactly once per scan"), and every publisher in `ndt_scan_matcher` is reliable
-/// with a shallow depth, so a `KeepLast` subscription would drop bursts and turn a counting
-/// assertion into a flake.
-///
-/// Absence assertions ("this topic was NOT published") are only meaningful once the
-/// subscription exists, so captures must be created *before* the stimulus that could publish.
+/// `KeepAll().reliable()` is deliberate: assertions count messages, and the node's publishers are
+/// reliable with a shallow depth. Create the capture before the input that could publish.
 template <typename MsgT>
 class TopicCapture
 {
 public:
-  /// @param qos Not defaulted: `NdtHarness::capture` owns the default and always forwards it, so a
-  /// second default here would be unreachable and free to drift out of step with it.
+  /// `qos` is not defaulted, so it cannot drift from `NdtHarness::capture`, which always passes it.
   TopicCapture(rclcpp::Node * observer, const std::string & topic, const rclcpp::QoS & qos)
   {
     subscription_ =
@@ -56,14 +50,7 @@ public:
     return messages_.size();
   }
 
-  /// @brief How many publishers this subscription has matched.
-  ///
-  /// The discovery gate for absence assertions, and the counterpart of
-  /// `DiagnosticsCapture::publisher_count`. "This topic was not published" only means anything once
-  /// the subscription has matched the node's publisher; before that it is a statement about
-  /// discovery, not about the node. The node creates every publisher in its constructor, so in
-  /// practice this is already non-zero by the time a test looks — waiting on it removes the
-  /// assumption rather than a delay.
+  /// Publisher count, the discovery gate: silence means nothing until a publisher is connected.
   [[nodiscard]] size_t publisher_count() const { return subscription_->get_publisher_count(); }
 
   [[nodiscard]] std::vector<MsgT> messages() const
@@ -72,23 +59,8 @@ public:
     return messages_;
   }
 
-  /// @brief A copy of the first message received, or nullopt.
-  ///
-  /// Returned **by value** while the lock is held, because handing out a reference into
-  /// `messages_` would race the callback that appends to it. Callers must therefore bind the
-  /// result to a value:
-  ///
-  /// @code
-  ///   const auto published = capture->first();      // right
-  ///   ASSERT_TRUE(published.has_value());
-  ///   const auto & field = published->some.field;
-  ///
-  ///   const auto & field = capture->first()->some.field;   // dangles
-  /// @endcode
-  ///
-  /// Lifetime extension does not save the second form: it applies to a reference bound to a
-  /// temporary or to a subobject reached through member access, and `optional::operator->` is a
-  /// function call, which ends the chain. The temporary dies at the end of the full-expression.
+  /// A copy of the first message, or nullopt. Returned by value under the lock, so bind it to a
+  /// value: `capture->first()->field` dangles.
   [[nodiscard]] std::optional<MsgT> first() const
   {
     const std::lock_guard<std::mutex> lock(mutex_);

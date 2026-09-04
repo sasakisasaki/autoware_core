@@ -49,23 +49,20 @@ namespace ndt_test
 
 using namespace std::chrono_literals;  // NOLINT(build/namespaces)
 
-/// @brief Where a scan's bracketing initial poses should sit, and how to tell them apart.
+/// Where a scan's bracketing initial poses should sit, and how to tell them apart.
 struct InitialPoseSpec
 {
   /// Position of the *older* pose.
   double x{map_center_x};
   double y{map_center_y};
-  /// Third on purpose, so a case needing a non-default frame can write `{x, y, frame}` rather than
-  /// spelling out the numeric fields that would otherwise sit in between. Only `{x, y}` is
-  /// initialized positionally today; everything below is reached by naming it.
+  /// Third on purpose, so a test needing a non-default frame can write `{x, y, frame}`.
   std::string frame_id{map_frame};
-  /// Offset of the *newer* pose from the older one. Non-zero makes the interpolated position
-  /// distinguishable from both endpoints. Must stay within
+  /// Offset of the *newer* pose from the older one. Must stay within
   /// `validation.initial_pose_distance_tolerance_m` (10 m) or interpolation is rejected.
   double delta_x{0.0};
 };
 
-/// @brief One scan-driving attempt's parameters.
+/// One scan-driving attempt's parameters.
 struct ScanDrive
 {
   /// Builds the cloud for a given stamp. Defaults to the standard half-cubic scan.
@@ -73,12 +70,9 @@ struct ScanDrive
     [](const builtin_interfaces::msg::Time & stamp) { return make_scan_at(stamp); };
   /// When set, two poses bracketing the scan stamp are published and confirmed first.
   std::optional<InitialPoseSpec> initial_pose{};
-  /// Runs after the bracketing poses are confirmed and before the scan is published. This is the
-  /// seam for tests that need to disturb buffer state mid-sequence.
+  /// Runs after the initial poses are confirmed and before the scan is published.
   std::function<void()> before_scan{};
-  /// Shifts the scan stamp relative to "now". A negative offset makes the scan late on purpose;
-  /// it applies to every attempt, so retries stay equally late and a latency assertion cannot
-  /// silently pass for the wrong reason.
+  /// Shifts the scan stamp relative to "now". Applies to every attempt, so retries stay late too.
   std::chrono::nanoseconds stamp_offset{0};
   std::chrono::nanoseconds timeout{20s};
   int attempts{3};
@@ -88,36 +82,19 @@ struct ScanOutcome
 {
   builtin_interfaces::msg::Time stamp{};
   DiagnosticsCapture::Record diag{};
-  /// Which attempt produced this. Non-zero means an earlier attempt was abandoned, so a
-  /// "published exactly once" assertion may be counting two alignments rather than one node bug.
+  /// Which attempt produced this. Non-zero means an earlier attempt was abandoned.
   int attempt{0};
 };
 
-/// @brief Drives a real `NDTScanMatcher` and observes everything it emits.
-///
-/// ## Executor topology
-///
-/// Three executors, deliberately:
-///
-/// | What                                        | Executor                 | Thread        |
-/// |---------------------------------------------|--------------------------|---------------|
-/// | `NDTScanMatcher`                            | `MultiThreadedExecutor`  | dedicated     |
-/// | `StubMapLoader`                             | `SingleThreadedExecutor` | dedicated     |
-/// | observer node (captures, stimulus, clients) | `SingleThreadedExecutor` | test thread   |
-///
-/// The observer side is pumped with `spin_some` from the test thread, which makes waiting
-/// deterministic: nothing is observed unless the test asks for it. Tests never call
-/// `rclcpp::shutdown()`; the destructor owns teardown.
+/// Drives a real `NDTScanMatcher` and observes everything it emits.
 class NdtHarness
 {
 public:
   using AlignService = autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped;
   using Record = DiagnosticsCapture::Record;
 
-  /// @param overrides Appended *after* the shipped yaml. `NodeOptions::parameter_overrides()`
-  /// is applied in vector order into a map, so the last write wins and these take effect.
-  /// @param with_map_loader False leaves `pcd_loader_service` unserved, for the loader-absent
-  /// case; everything else is unchanged.
+  /// `overrides` is appended after the shipped yaml, and later entries win. `with_map_loader`
+  /// false leaves `pcd_loader_service` unserved, for the loader-absent test.
   explicit NdtHarness(std::vector<rclcpp::Parameter> overrides = {}, bool with_map_loader = true)
   : overrides_(std::move(overrides))
   {
@@ -192,14 +169,8 @@ public:
   [[nodiscard]] DiagnosticsCapture & diag() const { return *diagnostics_; }
   [[nodiscard]] rclcpp::Time now() const { return observer_->now(); }
 
-  /// @brief Start recording a topic. Must be called before the stimulus that could publish it,
-  /// otherwise "was not published" assertions are vacuous.
-  ///
-  /// A capture that outlives the harness stops receiving rather than dangling: `TopicCapture` holds
-  /// only the `Subscription::SharedPtr`, and that keeps the underlying `rcl_node_t` alive even once
-  /// the observer `rclcpp::Node` is gone. So the constraint is about meaning, not safety -- counts
-  /// read after the harness is destroyed are frozen, not wrong. Test-local variables declared after
-  /// the harness avoid the question entirely by destruction order.
+  /// Starts recording a topic. Must be called before the input that could publish it, or a check
+  /// for silence proves nothing.
   template <typename MsgT>
   std::shared_ptr<TopicCapture<MsgT>> capture(
     const std::string & topic, const rclcpp::QoS & qos = rclcpp::QoS(rclcpp::KeepAll()).reliable())
@@ -209,7 +180,7 @@ public:
 
   // ------------------------------------------------------------------ pumping
 
-  /// @brief Pump until `predicate` holds, or the timeout expires.
+  /// Pump until `predicate` holds, or the timeout expires.
   bool wait_until(const std::function<bool()> & predicate, const std::chrono::nanoseconds timeout)
   {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -226,11 +197,8 @@ public:
     return false;
   }
 
-  /// @brief Wait until the node has advertised all of its `/diagnostics` publishers.
-  ///
-  /// Each `DiagnosticsInterface` creates its own publisher, so the count is exact: five normally,
-  /// six when `ndt.regularization.enable` is true. This is the discovery gate; no stimulus may be
-  /// sent before it returns true, or the resulting diagnostics are lost.
+  /// Waits until the node has advertised all `/diagnostics` publishers: five, or six with
+  /// `ndt.regularization.enable`. No input may be sent before this returns true.
   bool wait_for_diagnostics_ready(
     const size_t expected_publishers = 5, const std::chrono::nanoseconds timeout = 10s)
   {
@@ -240,7 +208,7 @@ public:
 
   // -------------------------------------------------------- diagnostics waits
 
-  /// @brief Wait for the record whose stamp equals `stamp` (subscriber statuses only).
+  /// Wait for the record whose stamp equals `stamp` (subscriber statuses only).
   std::optional<Record> wait_for_diag_stamp(
     const std::string & status_name, const builtin_interfaces::msg::Time & stamp,
     const std::chrono::nanoseconds timeout = 10s)
@@ -255,13 +223,8 @@ public:
     return found;
   }
 
-  /// @brief Wait for a record of `status_name` newer than the last `mark()`.
-  ///
-  /// The counterpart of `wait_for_diag_stamp` for the statuses published with `now()` instead of an
-  /// input stamp. A service response can arrive before the diagnostics its handler published, so
-  /// reading `newest_since_mark` straight after the call is a race rather than a correlation. It is
-  /// narrow enough to pass on an ordinary build and lose on a slow one -- a coverage-instrumented
-  /// run is what caught it.
+  /// Waits for a record of `status_name` newer than the last `mark()`, for statuses stamped with
+  /// `now()`. A service can answer before its diagnostics are published, so this is not optional.
   std::optional<Record> wait_for_diag_since_mark(
     const std::string & status_name, const std::chrono::nanoseconds timeout = 10s)
   {
@@ -275,7 +238,7 @@ public:
     return found;
   }
 
-  /// @brief Wait for any record of `status_name` satisfying `predicate`.
+  /// Wait for any record of `status_name` satisfying `predicate`.
   std::optional<Record> wait_for_diag(
     const std::string & status_name, const std::function<bool(const Record &)> & predicate,
     const std::chrono::nanoseconds timeout = 10s)
@@ -297,32 +260,22 @@ public:
 
   // ----------------------------------------------------------------- stimulus
 
-  /// @brief Activate the node, by calling `trigger_node_srv` (`std_srvs/SetBool`) with `true`.
-  ///
-  /// The service sets `is_activated_`, which gates both the scan-matching hot path and the
-  /// initial-pose subscriber, and clears the initial-pose buffer as a side effect. In the real
-  /// system `autoware_pose_initializer` drives it: `false` while the initial pose is being
-  /// estimated, `true` once `ndt_align_srv` has answered.
-  ///
-  /// Returns the response's `success`, or nullopt on timeout.
+  /// Activates the node via `trigger_node_srv`, which sets `is_activated_` and clears the
+  /// initial-pose buffer. Returns the response's `success`, or nullopt on timeout.
   std::optional<bool> activate(const std::chrono::nanoseconds timeout = 10s)
   {
     return set_activation(true, timeout);
   }
 
-  /// @brief The same service with `false`, as `autoware_pose_initializer` does while it is
-  /// estimating the initial pose.
-  ///
-  /// A deactivated node rejects scans at its activation gate, and that gate is also one of the two
-  /// things that reset the skip counter — which is how the non-converged case cleans up the
-  /// process-global counter it advanced.
+  /// The same service with `false`. Its activation check is also one of the two skip-counter
+  /// resets.
   std::optional<bool> deactivate(const std::chrono::nanoseconds timeout = 10s)
   {
     return set_activation(false, timeout);
   }
 
-  /// @brief Call `ndt_align_srv`. The timeout is generous because the handler synchronously loads
-  /// the map and then runs one NDT alignment per particle.
+  /// Calls `ndt_align_srv`. The timeout is generous: the handler loads the map and runs one
+  /// alignment per particle.
   std::optional<AlignService::Response> call_ndt_align(
     const geometry_msgs::msg::PoseWithCovarianceStamped & pose,
     const std::chrono::nanoseconds timeout = 60s)
@@ -340,11 +293,8 @@ public:
     return *future.get();
   }
 
-  /// @brief Publish one initial pose and wait until the node has reported receiving it.
-  ///
-  /// Waiting on the stamp-correlated diagnostic is what makes the buffer state deterministic
-  /// before a scan is published, instead of sleeping and hoping. It works whether or not the pose
-  /// is accepted, because the diagnostic is published either way.
+  /// Publishes one initial pose and waits until the node reports receiving it. The diagnostic
+  /// appears whether or not the pose is accepted, so this fixes buffer state before a scan.
   bool publish_initial_pose_and_confirm(
     const geometry_msgs::msg::PoseWithCovarianceStamped & pose,
     const std::chrono::nanoseconds timeout = 10s)
@@ -358,9 +308,8 @@ public:
     initial_pose_pub_->publish(pose);
   }
 
-  /// @brief Publish a regularization pose. The node subscribes only with
-  /// `ndt.regularization.enable`, so the publisher is created on first use and waits for that
-  /// subscription to match.
+  /// Publishes a regularization pose. The node subscribes only with `ndt.regularization.enable`,
+  /// so the publisher is created on first use and waits for a subscriber.
   bool publish_regularization_pose(
     const geometry_msgs::msg::PoseWithCovarianceStamped & pose,
     const std::chrono::nanoseconds timeout = 5s)
@@ -380,12 +329,8 @@ public:
 
   void publish_scan(const sensor_msgs::msg::PointCloud2 & cloud) { scan_pub_->publish(cloud); }
 
-  /// @brief Wait until the node has matched every publisher a test drives it through.
-  ///
-  /// `/tf_static` is included because a scan that arrives before the node's listener holds
-  /// `base_link -> sensor_frame` fails its transform with an ERROR, which looks exactly like a
-  /// behavior change. Matching is necessary but not sufficient -- the node still has to run the
-  /// callback -- so `drive_one_scan` also retries that specific startup race.
+  /// Waits until the node has matched every publisher a test drives it through, `/tf_static`
+  /// included: a scan arriving before that transform fails with an ERROR that looks like a bug.
   bool wait_for_stimulus_discovery(const std::chrono::nanoseconds timeout = 10s)
   {
     return wait_until(
@@ -399,12 +344,8 @@ public:
 
   // -------------------------------------------------------- composite drivers
 
-  /// @brief Activate the node and wait for the 1 Hz timer to load the stub map.
-  ///
-  /// This is what makes the scan-matching hot path reachable *without* `ndt_align_srv`, and
-  /// therefore without constructing a `TreeStructuredParzenEstimator`, whose RNG engine is a
-  /// process-global `std::mt19937_64` seeded once. `should_update_map` returns true unconditionally
-  /// while `last_update_position_` is unset, so one initial pose is enough to make the timer load.
+  /// Activates the node and waits for the 1 Hz timer to load the stub map, so the scan-matching
+  /// path is reachable without `ndt_align_srv` and its shared random generator.
   bool ensure_map_loaded(const std::chrono::nanoseconds timeout = 30s)
   {
     const auto activated = activate(timeout);
@@ -419,13 +360,10 @@ public:
       .has_value();
   }
 
-  /// @brief Publish one scan, with optional bracketing initial poses, and return the
-  /// `scan_matching_status` record it produced.
-  ///
-  /// Each attempt uses a fresh, strictly later time window. Re-publishing the same stamp would
-  /// not work: `pop_old` drops the older bracketing pose after a successful interpolation, so a
-  /// retry on the same window would find fewer than two poses and produce *different*
-  /// diagnostics. Retries are necessary because `points_raw` is best-effort with `keep_last(1)`.
+  /// Publishes one scan, with optional surrounding initial poses, and returns its
+  /// `scan_matching_status` record. Each attempt uses a later time window, because `pop_old` drops
+  /// the older pose after a successful interpolation. Retries are needed: `points_raw` is
+  /// best-effort.
   std::optional<ScanOutcome> drive_one_scan(const ScanDrive & drive)
   {
     const rclcpp::Time base = now() + rclcpp::Duration(drive.stamp_offset);
@@ -473,7 +411,7 @@ public:
   }
 
 private:
-  /// @brief Call `trigger_node_srv` with `enable`. Returns `success`, or nullopt on timeout.
+  /// Call `trigger_node_srv` with `enable`. Returns `success`, or nullopt on timeout.
   std::optional<bool> set_activation(const bool enable, const std::chrono::nanoseconds timeout)
   {
     if (!trigger_client_->wait_for_service(5s)) {
@@ -491,18 +429,8 @@ private:
     return future.get()->success;
   }
 
-  /// @brief Block until `executor` has actually entered `spin()`.
-  ///
-  /// `Executor::cancel()` clears the same `spinning` flag that `spin()` sets on entry, so a cancel
-  /// arriving first is simply lost: `spin()` sets the flag back to true and then loops until its
-  /// context shuts down, and the `join()` in the destructor never returns. Nothing otherwise
-  /// guarantees the spawned thread wins that race -- the gate cases tear their harness down about
-  /// 20 ms after building it, and the loader executor is never exercised at all -- so construction
-  /// waits for the flag rather than assuming.
-  ///
-  /// This was a real hang, roughly one full run in fifteen under `ctest -j4`, which ctest killed at
-  /// its own timeout and so reported as a plain failure with no output. Delaying the loader
-  /// thread's entry into `spin()` by 50 ms reproduces it every time without this wait.
+  /// Blocks until `executor` has entered `spin()`. A `cancel()` arriving first is lost and the
+  /// destructor's `join()` never returns. This was a real hang, about one run in fifteen.
   static void wait_until_spinning(rclcpp::Executor & executor)
   {
     while (rclcpp::ok() && !executor.is_spinning()) {
@@ -510,13 +438,10 @@ private:
     }
   }
 
-  /// @brief Process observer-side work that is currently ready.
+  /// Process observer-side work that is currently ready.
   void pump() { observer_executor_->spin_some(5ms); }
 
-  /// @brief Load the shipped parameter file, then append the test's overrides.
-  ///
-  /// Loading the real yaml keeps the shipped defaults under test (an undeclared parameter throws
-  /// at construction) while the appended overrides pin whatever the assertions depend on.
+  /// Loads the shipped yaml, then appends the test's overrides, which win.
   [[nodiscard]] rclcpp::NodeOptions build_node_options() const
   {
     const std::string yaml_path =
@@ -543,12 +468,8 @@ private:
     return node_options;
   }
 
-  /// @brief Publish the static `base_link -> sensor_frame` transform the node needs to bring a
-  /// scan into the base frame.
-  ///
-  /// The broadcaster lives on the observer node, not on the node under test, so that the test
-  /// thread owns every piece of stimulus. `/tf_static` is transient-local, so the node's listener
-  /// still receives it even though it subscribes later.
+  /// Publishes the static `base_link -> sensor_frame` transform the node needs. Transient-local,
+  /// so the node receives it even though it subscribes later.
   void broadcast_sensor_tf()
   {
     static_tf_broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(observer_);
@@ -560,8 +481,7 @@ private:
     static_tf_broadcaster_->sendTransform(transform);
   }
 
-  /// @brief Distinct observer node names, so a lingering node from a previous test cannot be
-  /// confused with this one during teardown.
+  /// Distinct observer node names, so a leftover node cannot be confused with this one.
   static std::string unique_suffix()
   {
     static std::atomic<int> counter{0};

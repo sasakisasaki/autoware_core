@@ -31,26 +31,8 @@
 namespace ndt_test
 {
 
-/// @brief The only map in this world: `make_corner_cloud` in two cells, "0" anchored at the map
-/// center and "1" at `second_cell_x`.
-///
-/// Differential, like the loader it stands in for: a cell is returned when the requested circle
-/// covers its anchor and `cached_ids` does not list it, and a cached cell whose anchor the circle
-/// no longer covers comes back in `ids_to_remove`. A node re-querying from inside its cells gets an
-/// empty response, which `update_ndt` reports as `is_updated_map: False`.
-///
-/// Cell "1" sits where only the cell-boundary walk reaches it. Every other case queries from at
-/// most x = 125 with a radius of 150, so an anchor at x <= 275 would enter their responses and
-/// change their maps -- `maps_to_add_size == "0"` in the steady-state case is the first thing that
-/// breaks.
-///
-/// Asking away from both anchors yields nothing. `MissingMapAbortsBeforeAlignment` asks at
-/// (-100, -100): the load fails once, and since a failed load still records the position
-/// (`map_update_module.cpp:176`), the timer does not try again until the vehicle moves
-/// `update_distance`.
-///
-/// @note `test/stub_pcd_loader.hpp` still serves the three pre-existing node tests from its own
-/// hand-written cloud; merging the two was left out of scope.
+/// The only map in this world: `make_corner_cloud` in two cells, "0" at the map center and "1" at
+/// `second_cell_x`.
 class StubMapLoader : public rclcpp::Node
 {
   using GetDifferentialPointCloudMap = autoware_map_msgs::srv::GetDifferentialPointCloudMap;
