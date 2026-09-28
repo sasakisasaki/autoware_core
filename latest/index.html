@@ -7763,6 +7763,53 @@
     
   
   
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#code-coverage-metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Code Coverage Metrics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Code Coverage Metrics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#entire-project-coverage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Entire Project Coverage
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#component-wise-coverage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Component-wise Coverage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
 </nav>
                   </div>
                 </div>
@@ -7791,7 +7838,63 @@
 </ul>
 <ul>
 <li>For researchers and developers who want to extend the functionality of Autoware Core with experimental, cutting-edge ROS packages, see <a href="https://github.com/autowarefoundation/autoware_universe">Autoware Universe</a>.</li>
-</ul></div>
+</ul>
+<h2 id="code-coverage-metrics">Code Coverage Metrics<a class="headerlink" href="#code-coverage-metrics" title="Permanent link">#</a></h2>
+<p>The table below shows the coverage rate of the entire Autoware Core and of each sub-component.</p>
+<h3 id="entire-project-coverage">Entire Project Coverage<a class="headerlink" href="#entire-project-coverage" title="Permanent link">#</a></h3>
+<p><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core/tree/main"><img alt="codecov" src="https://codecov.io/gh/autowarefoundation/autoware_core/branch/main/graph/badge.svg"></a></p>
+<h3 id="component-wise-coverage">Component-wise Coverage<a class="headerlink" href="#component-wise-coverage" title="Permanent link">#</a></h3>
+<p>You can check more details by clicking a badge and navigating the Codecov website.</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Coverage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>API</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=API%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=API%20Packages&amp;query=$.[0].coverage&amp;suffix=%25"></a></td>
+</tr>
+<tr>
+<td>Common</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=Common%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=Common%20Packages&amp;query=$.[1].coverage&amp;suffix=%25"></a></td>
+</tr>
+<tr>
+<td>Control</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=Control%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=Control%20Packages&amp;query=$.[2].coverage&amp;suffix=%25"></a></td>
+</tr>
+<tr>
+<td>Localization</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=Localization%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=Localization%20Packages&amp;query=$.[3].coverage&amp;suffix=%25"></a></td>
+</tr>
+<tr>
+<td>Map</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=Map%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=Map%20Packages&amp;query=$.[4].coverage&amp;suffix=%25"></a></td>
+</tr>
+<tr>
+<td>Perception</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=Perception%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=Perception%20Packages&amp;query=$.[5].coverage&amp;suffix=%25"></a></td>
+</tr>
+<tr>
+<td>Planning</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=Planning%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=Planning%20Packages&amp;query=$.[6].coverage&amp;suffix=%25"></a></td>
+</tr>
+<tr>
+<td>Sensing</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=Sensing%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=Sensing%20Packages&amp;query=$.[7].coverage&amp;suffix=%25"></a></td>
+</tr>
+<tr>
+<td>Testing</td>
+<td><a href="https://app.codecov.io/gh/autowarefoundation/autoware_core?components%5B0%5D=Testing%20Packages"><img alt="codecov" src="https://img.shields.io/badge/dynamic/json?url=https://codecov.io/api/v2/github/autowarefoundation/repos/autoware_core/components&amp;label=Testing%20Packages&amp;query=$.[8].coverage&amp;suffix=%25"></a></td>
+</tr>
+</tbody>
+</table>
+<!-- NOTE: `query` indices are positional and must match the declaration order of -->
+<!-- `component_management.individual_components` in codecov.yaml. -->
+<!-- `autoware_core/`, `description/` and `vehicle/` are launch/URDF-only and are -->
+<!-- therefore not tracked as components. --></div>
 
 
 
