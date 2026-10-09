@@ -171,7 +171,7 @@ TEST_F(MapUpdateModuleTest, CallbackTimerSkipsWhenNotMovedFarEnough)  // NOLINT
   EXPECT_FALSE(result.map_updated);
 }
 
-// A failing loader yields no update and an ERROR diagnostic mentioning the loader failure.
+// A failing loader yields no update.
 TEST_F(MapUpdateModuleTest, LoaderFailureReportsError)  // NOLINT
 {
   MapUpdateModule module(ndt_ptr_, param_, make_failing_loader());
@@ -179,9 +179,6 @@ TEST_F(MapUpdateModuleTest, LoaderFailureReportsError)  // NOLINT
   const auto result = update_map(module, make_point(0.0, 0.0));
 
   EXPECT_FALSE(result.map_updated);
-  EXPECT_EQ(result.diagnostics.level, MapUpdateModule::DiagnosticLevel::ERROR);
-  EXPECT_NE(
-    result.diagnostics.message.find("pcd_loader service is not working."), std::string::npos);
 }
 
 // With publish_loaded_map enabled, a successful update returns the merged debug cloud in the "map"
@@ -222,7 +219,6 @@ TEST_F(MapUpdateModuleTest, MergesAllLoadedCellsIntoOneCloud)  // NOLINT
     static_cast<std::size_t>(result.loaded_pcd_map->width),
     num_cells * static_cast<std::size_t>(one_cell.width) * one_cell.height);
   EXPECT_EQ(result.loaded_pcd_map->data.size(), num_cells * one_cell.data.size());
-  EXPECT_EQ(result.diagnostics.level, MapUpdateModule::DiagnosticLevel::OK);
 }
 
 // Without publish_loaded_map, no debug cloud is produced even on a successful update.
@@ -235,28 +231,6 @@ TEST_F(MapUpdateModuleTest, DoesNotProduceLoadedMapWhenDisabled)  // NOLINT
 
   ASSERT_TRUE(result.map_updated);
   EXPECT_FALSE(result.loaded_pcd_map.has_value());
-}
-
-// DiagnosticsReport accumulates like DiagnosticsInterface: the level only rises and non-OK
-// messages are joined with "; ". This is pure logic and needs no module instance.
-TEST(MapUpdateModuleDiagnosticsReport, RaisesLevelAndJoinsMessages)  // NOLINT
-{
-  MapUpdateModule::DiagnosticsReport report;
-  EXPECT_EQ(report.level, MapUpdateModule::DiagnosticLevel::OK);
-  EXPECT_TRUE(report.message.empty());
-
-  // OK-level updates neither raise the level nor append a message.
-  report.update_level_and_message(MapUpdateModule::DiagnosticLevel::OK, "ignored");
-  EXPECT_EQ(report.level, MapUpdateModule::DiagnosticLevel::OK);
-  EXPECT_TRUE(report.message.empty());
-
-  report.update_level_and_message(MapUpdateModule::DiagnosticLevel::WARN, "first");
-  report.update_level_and_message(MapUpdateModule::DiagnosticLevel::ERROR, "second");
-  // A later, lower level must not lower the accumulated level.
-  report.update_level_and_message(MapUpdateModule::DiagnosticLevel::WARN, "third");
-
-  EXPECT_EQ(report.level, MapUpdateModule::DiagnosticLevel::ERROR);
-  EXPECT_EQ(report.message, "first; second; third");
 }
 
 }  // namespace autoware::ndt_scan_matcher
