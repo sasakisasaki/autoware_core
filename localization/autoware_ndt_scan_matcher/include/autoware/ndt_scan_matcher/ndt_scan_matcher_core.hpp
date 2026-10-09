@@ -25,6 +25,7 @@
 #include <autoware/agnocast_wrapper/node.hpp>
 #include <autoware/agnocast_wrapper/tf2.hpp>
 #include <autoware/localization_util/smart_pose_buffer.hpp>
+#include <autoware_utils_diagnostics/diagnostics_interface.hpp>
 #include <autoware_utils_logging/logger_level_configure.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2/transform_datatypes.hpp>
@@ -32,6 +33,7 @@
 #include <autoware_internal_debug_msgs/msg/float32_stamped.hpp>
 #include <autoware_internal_debug_msgs/msg/int32_stamped.hpp>
 #include <autoware_internal_localization_msgs/srv/pose_with_covariance_stamped.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
@@ -63,6 +65,9 @@
 
 namespace autoware::ndt_scan_matcher
 {
+using DiagnosticsInterface =
+  autoware_utils_diagnostics::BasicDiagnosticsInterface<autoware::agnocast_wrapper::Node>;
+
 class NDTScanMatcher : public autoware::agnocast_wrapper::Node
 {
   using PointSource = pcl::PointXYZ;
@@ -159,6 +164,10 @@ private:
   get_differential_point_cloud_map(
     const MapUpdateModule::GetDifferentialPointCloudMap::Request::SharedPtr & request);
 
+  // Forwards a diagnostics update produced by MapUpdateModule to the given DiagnosticsInterface.
+  static void apply_diagnostics_update(
+    DiagnosticsInterface & diagnostics, const MapUpdateModule::DiagnosticsReport & report);
+
   AUTOWARE_TIMER_PTR map_update_timer_;
   AUTOWARE_SUBSCRIPTION_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) initial_pose_sub_;
   AUTOWARE_SUBSCRIPTION_PTR(sensor_msgs::msg::PointCloud2) sensor_points_sub_;
@@ -222,6 +231,12 @@ private:
   std::unique_ptr<autoware::localization_util::SmartPoseBuffer> regularization_pose_buffer_;
 
   std::atomic<bool> is_activated_;
+  std::unique_ptr<DiagnosticsInterface> diagnostics_scan_points_;
+  std::unique_ptr<DiagnosticsInterface> diagnostics_initial_pose_;
+  std::unique_ptr<DiagnosticsInterface> diagnostics_regularization_pose_;
+  std::unique_ptr<DiagnosticsInterface> diagnostics_map_update_;
+  std::unique_ptr<DiagnosticsInterface> diagnostics_ndt_align_;
+  std::unique_ptr<DiagnosticsInterface> diagnostics_trigger_node_;
   std::unique_ptr<MapUpdateModule> map_update_module_;
   std::unique_ptr<
     autoware_utils_logging::BasicLoggerLevelConfigure<autoware::agnocast_wrapper::Node>>

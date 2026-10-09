@@ -42,9 +42,11 @@
 #include <cmath>
 #include <functional>
 #include <future>
+#include <iomanip>
 #include <map>
 #include <thread>
 #include <utility>
+#include <variant>
 
 namespace autoware::ndt_scan_matcher
 {
@@ -118,6 +120,9 @@ NDTScanMatcher::NDTScanMatcher(const rclcpp::NodeOptions & options)
     const double value_as_unlimited = 1000.0;
     regularization_pose_buffer_ =
       std::make_unique<SmartPoseBuffer>(this->get_logger(), value_as_unlimited, value_as_unlimited);
+
+    diagnostics_regularization_pose_ =
+      std::make_unique<DiagnosticsInterface>(this, "regularization_pose_subscriber_status");
   }
 
   sensor_aligned_pose_pub_ =
@@ -199,6 +204,14 @@ NDTScanMatcher::NDTScanMatcher(const rclcpp::NodeOptions & options)
       return this->get_differential_point_cloud_map(request);
     });
 
+  diagnostics_scan_points_ = std::make_unique<DiagnosticsInterface>(this, "scan_matching_status");
+  diagnostics_initial_pose_ =
+    std::make_unique<DiagnosticsInterface>(this, "initial_pose_subscriber_status");
+  diagnostics_map_update_ = std::make_unique<DiagnosticsInterface>(this, "map_update_status");
+  diagnostics_ndt_align_ = std::make_unique<DiagnosticsInterface>(this, "ndt_align_service_status");
+  diagnostics_trigger_node_ =
+    std::make_unique<DiagnosticsInterface>(this, "trigger_node_service_status");
+
   logger_configure_ = std::make_unique<
     autoware_utils_logging::BasicLoggerLevelConfigure<autoware::agnocast_wrapper::Node>>(this);
 }
@@ -230,6 +243,17 @@ NDTScanMatcher::get_differential_point_cloud_map(
   return result.get();
 }
 
+void NDTScanMatcher::apply_diagnostics_update(
+  DiagnosticsInterface & diagnostics, const MapUpdateModule::DiagnosticsReport & report)
+{
+  for (const auto & key_value : report.key_values) {
+    std::visit(
+      [&](const auto & value) { diagnostics.add_key_value(key_value.key, value); },
+      key_value.value);
+  }
+  diagnostics.update_level_and_message(static_cast<int8_t>(report.level), report.message);
+}
+
 void NDTScanMatcher::publish_loaded_map_if_present(
   MapUpdateModule::UpdateResult & result, const rclcpp::Time & stamp) const
 {
@@ -244,36 +268,80 @@ void NDTScanMatcher::callback_timer()
 {
   const rclcpp::Time ros_time_now = this->now();
 
+  diagnostics_map_update_->clear();
+
+  diagnostics_map_update_->add_key_value("timer_callback_time_stamp", ros_time_now.nanoseconds());
+
+  // check is_activated
+  diagnostics_map_update_->add_key_value("is_activated", static_cast<bool>(is_activated_));
   if (!is_activated_) {
+    diagnostics_map_update_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, "Node is not activated.");
+    diagnostics_map_update_->publish(ros_time_now);
     return;
   }
 
+  // check is_set_last_update_position
   const auto latest_ekf_position = latest_ekf_position_.with([](const auto & pos) { return pos; });
-  if (latest_ekf_position == std::nullopt) {
+  const bool is_set_last_update_position = (latest_ekf_position != std::nullopt);
+  diagnostics_map_update_->add_key_value(
+    "is_set_last_update_position", is_set_last_update_position);
+  if (!is_set_last_update_position) {
+    diagnostics_map_update_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN,
+      "Cannot find the reference position for map update."
+      "Please check if the EKF odometry is provided to NDT.");
+    diagnostics_map_update_->publish(ros_time_now);
     return;
   }
 
   auto result = map_update_module_->callback_timer(latest_ekf_position.value());
+  apply_diagnostics_update(*diagnostics_map_update_, result.diagnostics);
 
   publish_loaded_map_if_present(result, ros_time_now);
+  diagnostics_map_update_->publish(ros_time_now);
 }
 
 void NDTScanMatcher::callback_initial_pose(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
   initial_pose_msg_ptr)
 {
+  diagnostics_initial_pose_->clear();
+
   callback_initial_pose_main(initial_pose_msg_ptr);
+
+  diagnostics_initial_pose_->publish(initial_pose_msg_ptr->header.stamp);
 }
 
 void NDTScanMatcher::callback_initial_pose_main(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
   initial_pose_msg_ptr)
 {
+  diagnostics_initial_pose_->add_key_value(
+    "topic_time_stamp",
+    static_cast<rclcpp::Time>(initial_pose_msg_ptr->header.stamp).nanoseconds());
+
+  // check is_activated
+  diagnostics_initial_pose_->add_key_value("is_activated", static_cast<bool>(is_activated_));
   if (!is_activated_) {
+    std::stringstream message;
+    message << "Node is not activated.";
+    diagnostics_initial_pose_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
     return;
   }
 
-  if (initial_pose_msg_ptr->header.frame_id != param_.frame.map_frame) {
+  // check is_expected_frame_id
+  const bool is_expected_frame_id =
+    (initial_pose_msg_ptr->header.frame_id == param_.frame.map_frame);
+  diagnostics_initial_pose_->add_key_value("is_expected_frame_id", is_expected_frame_id);
+  if (!is_expected_frame_id) {
+    std::stringstream message;
+    message << "Received initial pose message with frame_id "
+            << initial_pose_msg_ptr->header.frame_id << ", but expected " << param_.frame.map_frame
+            << ". Please check the frame_id in the input topic and ensure it is correct.";
+    diagnostics_initial_pose_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::ERROR, message.str());
     return;
   }
 
@@ -287,16 +355,41 @@ void NDTScanMatcher::callback_regularization_pose(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
   pose_conv_msg_ptr)
 {
+  diagnostics_regularization_pose_->clear();
+
+  diagnostics_regularization_pose_->add_key_value(
+    "topic_time_stamp", static_cast<rclcpp::Time>(pose_conv_msg_ptr->header.stamp).nanoseconds());
+
   regularization_pose_buffer_->push_back(
     std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(*pose_conv_msg_ptr));
+
+  diagnostics_regularization_pose_->publish(pose_conv_msg_ptr->header.stamp);
 }
 
 void NDTScanMatcher::callback_sensor_points(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
   sensor_points_msg_in_sensor_frame)
 {
+  // clear diagnostics
+  diagnostics_scan_points_->clear();
+
   // scan matching
-  callback_sensor_points_main(sensor_points_msg_in_sensor_frame);
+  const bool is_succeed_scan_matching =
+    callback_sensor_points_main(sensor_points_msg_in_sensor_frame);
+
+  // check skipping_publish_num
+  static int64_t skipping_publish_num = 0;
+  skipping_publish_num =
+    ((is_succeed_scan_matching || !is_activated_) ? 0 : (skipping_publish_num + 1));
+  diagnostics_scan_points_->add_key_value("skipping_publish_num", skipping_publish_num);
+  if (skipping_publish_num >= param_.validation.skipping_publish_num) {
+    std::stringstream message;
+    message << "skipping_publish_num exceed limit (" << skipping_publish_num << " times).";
+    diagnostics_scan_points_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+  }
+
+  diagnostics_scan_points_->publish(sensor_points_msg_in_sensor_frame->header.stamp);
 }
 
 bool NDTScanMatcher::callback_sensor_points_main(
@@ -305,11 +398,40 @@ bool NDTScanMatcher::callback_sensor_points_main(
 {
   const auto exe_start_time = std::chrono::system_clock::now();
 
+  // check topic_time_stamp
   const rclcpp::Time sensor_ros_time = sensor_points_msg_in_sensor_frame->header.stamp;
+  diagnostics_scan_points_->add_key_value("topic_time_stamp", sensor_ros_time.nanoseconds());
 
   // check sensor_points_size
-  if (sensor_points_msg_in_sensor_frame->width == 0) {
+  const size_t sensor_points_size = sensor_points_msg_in_sensor_frame->width;
+  diagnostics_scan_points_->add_key_value("sensor_points_size", sensor_points_size);
+  if (sensor_points_size == 0) {
+    std::stringstream message;
+    message << "Sensor points is empty.";
+    diagnostics_scan_points_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
     return false;
+  }
+
+  // check sensor_points_delay_time_sec
+  const double sensor_points_delay_time_sec =
+    (this->now() - sensor_points_msg_in_sensor_frame->header.stamp).seconds();
+  diagnostics_scan_points_->add_key_value(
+    "sensor_points_delay_time_sec", sensor_points_delay_time_sec);
+  if (sensor_points_delay_time_sec > param_.sensor_points.timeout_sec) {
+    std::stringstream message;
+    message << "sensor points is experiencing latency."
+            << "The delay time is " << sensor_points_delay_time_sec << "[sec] "
+            << "(the tolerance is " << param_.sensor_points.timeout_sec << "[sec]).";
+    diagnostics_scan_points_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+
+    // If the delay time of the LiDAR topic exceeds the delay compensation time of ekf_localizer,
+    // even if further processing continues, the estimated result will be rejected by ekf_localizer.
+    // Therefore, it would be acceptable to exit the function here.
+    // However, for now, we will continue the processing as it is.
+
+    // return false;
   }
 
   // preprocess input pointcloud
@@ -330,9 +452,13 @@ bool NDTScanMatcher::callback_sensor_points_main(
     std::stringstream message;
     message << ex.what() << ". Please publish TF " << sensor_frame << " to "
             << param_.frame.base_frame;
+    diagnostics_scan_points_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::ERROR, message.str());
     RCLCPP_ERROR_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
+    diagnostics_scan_points_->add_key_value("is_succeed_transform_sensor_points", false);
     return false;
   }
+  diagnostics_scan_points_->add_key_value("is_succeed_transform_sensor_points", true);
 
   // check sensor_points_max_distance
   double max_distance = 0.0;
@@ -341,7 +467,13 @@ bool NDTScanMatcher::callback_sensor_points_main(
     max_distance = std::max(max_distance, distance);
   }
 
+  diagnostics_scan_points_->add_key_value("sensor_points_max_distance", max_distance);
   if (max_distance < param_.sensor_points.required_distance) {
+    std::stringstream message;
+    message << "Max distance of sensor points = " << std::fixed << std::setprecision(3)
+            << max_distance << " [m] < " << param_.sensor_points.required_distance << " [m]";
+    diagnostics_scan_points_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
     return false;
   }
 
@@ -349,7 +481,13 @@ bool NDTScanMatcher::callback_sensor_points_main(
     // store sensor points for ndt alignment
     sensor_points_in_baselink_frame_ = sensor_points_in_baselink_frame;
 
+    // check is_activated
+    diagnostics_scan_points_->add_key_value("is_activated", static_cast<bool>(is_activated_));
     if (!is_activated_) {
+      std::stringstream message;
+      message << "Node is not activated.";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
       return false;
     }
 
@@ -357,7 +495,18 @@ bool NDTScanMatcher::callback_sensor_points_main(
     std::optional<SmartPoseBuffer::InterpolateResult> interpolation_result_opt =
       initial_pose_buffer_->interpolate(sensor_ros_time);
 
-    if (interpolation_result_opt == std::nullopt) {
+    // check is_succeed_interpolate_initial_pose
+    const bool is_succeed_interpolate_initial_pose = (interpolation_result_opt != std::nullopt);
+    diagnostics_scan_points_->add_key_value(
+      "is_succeed_interpolate_initial_pose", is_succeed_interpolate_initial_pose);
+    if (!is_succeed_interpolate_initial_pose) {
+      std::stringstream message;
+      message << "Couldn't interpolate pose. Please verify that "
+                 "(1) the initial pose topic (primarily come from the EKF) is being published, and "
+                 "(2) the timestamps of the sensor PCD messages and pose messages are synchronized "
+                 "correctly.";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
       return false;
     }
 
@@ -373,11 +522,23 @@ bool NDTScanMatcher::callback_sensor_points_main(
     // Warn if the lidar has gone out of the map range
     if (map_update_module_->out_of_map_range(
           interpolation_result.interpolated_pose.pose.pose.position)) {
-      RCLCPP_WARN_STREAM_THROTTLE(
-        this->get_logger(), *this->get_clock(), 1000, "Lidar has gone out of the map range");
+      std::stringstream msg;
+
+      msg << "Lidar has gone out of the map range";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, msg.str());
+
+      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, msg.str());
     }
 
-    if (!ndt_ptr->hasTarget()) {
+    // check is_set_map_points
+    const bool is_set_map_points = ndt_ptr->hasTarget();
+    diagnostics_scan_points_->add_key_value("is_set_map_points", is_set_map_points);
+    if (!is_set_map_points) {
+      std::stringstream message;
+      message << "Map points is not set.";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
       return false;
     }
 
@@ -395,15 +556,37 @@ bool NDTScanMatcher::callback_sensor_points_main(
       transformation_msg_array.push_back(pose_ros);
     }
 
+    // check iteration_num
+    diagnostics_scan_points_->add_key_value("iteration_num", ndt_result.iteration_num);
     const bool is_ok_iteration_num = (ndt_result.iteration_num < ndt_ptr->getMaximumIterations());
+    if (!is_ok_iteration_num) {
+      std::stringstream message;
+      message << "The number of iterations has reached its upper limit. The number of iterations: "
+              << ndt_result.iteration_num << ", Limit: " << ndt_ptr->getMaximumIterations() << ".";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    }
 
     // check local_optimal_solution_oscillation_num
     constexpr int oscillation_num_threshold = 10;
     const int oscillation_num = count_oscillation(transformation_msg_array);
+    diagnostics_scan_points_->add_key_value(
+      "local_optimal_solution_oscillation_num", oscillation_num);
     const bool is_local_optimal_solution_oscillation =
       (oscillation_num > oscillation_num_threshold);
+    if (is_local_optimal_solution_oscillation) {
+      std::stringstream message;
+      message << "There is a possibility of oscillation in a local minimum";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    }
 
     // check score
+    diagnostics_scan_points_->add_key_value(
+      "transform_probability", ndt_result.transform_probability);
+    diagnostics_scan_points_->add_key_value(
+      "nearest_voxel_transformation_likelihood",
+      ndt_result.nearest_voxel_transformation_likelihood);
     double score = 0.0;
     double score_threshold = 0.0;
     if (param_.score_estimation.converged_param_type == ConvergedParamType::TRANSFORM_PROBABILITY) {
@@ -416,10 +599,45 @@ bool NDTScanMatcher::callback_sensor_points_main(
       score_threshold =
         param_.score_estimation.converged_param_nearest_voxel_transformation_likelihood;
     } else {
-      RCLCPP_ERROR_STREAM_THROTTLE(
-        this->get_logger(), *this->get_clock(), 1000,
-        "Unknown converged param type. Please check `score_estimation.converged_param_type`");
+      std::stringstream message;
+      message
+        << "Unknown converged param type. Please check `score_estimation.converged_param_type`";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::ERROR, message.str());
       return false;
+    }
+
+    // check score diff
+    const std::vector<float> & tp_array = ndt_result.transform_probability_array;
+    if (static_cast<int>(tp_array.size()) != ndt_result.iteration_num + 1) {
+      // only publish warning to /diagnostics, not skip publishing pose
+      std::stringstream message;
+      message << "transform_probability_array size is not equal to iteration_num + 1."
+              << " transform_probability_array size: " << tp_array.size()
+              << ", iteration_num: " << ndt_result.iteration_num;
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    } else {
+      const float diff = tp_array.back() - tp_array.front();
+      diagnostics_scan_points_->add_key_value("transform_probability_diff", diff);
+      diagnostics_scan_points_->add_key_value("transform_probability_before", tp_array.front());
+    }
+    const std::vector<float> & nvtl_array =
+      ndt_result.nearest_voxel_transformation_likelihood_array;
+    if (static_cast<int>(nvtl_array.size()) != ndt_result.iteration_num + 1) {
+      // only publish warning to /diagnostics, not skip publishing pose
+      std::stringstream message;
+      message
+        << "nearest_voxel_transformation_likelihood_array size is not equal to iteration_num + 1."
+        << " nearest_voxel_transformation_likelihood_array size: " << nvtl_array.size()
+        << ", iteration_num: " << ndt_result.iteration_num;
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    } else {
+      const float diff = nvtl_array.back() - nvtl_array.front();
+      diagnostics_scan_points_->add_key_value("nearest_voxel_transformation_likelihood_diff", diff);
+      diagnostics_scan_points_->add_key_value(
+        "nearest_voxel_transformation_likelihood_before", nvtl_array.front());
     }
 
     bool is_ok_score = (score > score_threshold);
@@ -427,6 +645,8 @@ bool NDTScanMatcher::callback_sensor_points_main(
       std::stringstream message;
       message << "Score is below the threshold. Score: " << score
               << ", Threshold: " << score_threshold;
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
       RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
     }
 
@@ -460,10 +680,31 @@ bool NDTScanMatcher::callback_sensor_points_main(
       ndt_covariance[0 + 6 * 1] = estimated_covariance_2d_adj(0, 1);
     }
 
+    // check distance_initial_to_result
+    const auto distance_initial_to_result = static_cast<double>(autoware::localization_util::norm(
+      interpolation_result.interpolated_pose.pose.pose.position, result_pose_msg.position));
+    diagnostics_scan_points_->add_key_value(
+      "distance_initial_to_result", distance_initial_to_result);
+    if (distance_initial_to_result > param_.validation.initial_to_result_distance_tolerance_m) {
+      std::stringstream message;
+      message << "distance_initial_to_result is too large (" << distance_initial_to_result
+              << " [m]).";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    }
+
+    // check execution_time
     const auto exe_end_time = std::chrono::system_clock::now();
     const auto duration_micro_sec =
       std::chrono::duration_cast<std::chrono::microseconds>(exe_end_time - exe_start_time).count();
     const auto exe_time = static_cast<float>(duration_micro_sec) / 1000.0f;
+    diagnostics_scan_points_->add_key_value("execution_time", exe_time);
+    if (exe_time > param_.validation.critical_upper_bound_exe_time_ms) {
+      std::stringstream message;
+      message << "NDT exe time is too long (took " << exe_time << " [ms]).";
+      diagnostics_scan_points_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    }
 
     // publish
     initial_pose_with_covariance_pub_->publish(interpolation_result.interpolated_pose);
@@ -778,18 +1019,45 @@ void NDTScanMatcher::service_trigger_node(
   const std_srvs::srv::SetBool::Request::SharedPtr req,
   std_srvs::srv::SetBool::Response::SharedPtr res)
 {
+  const rclcpp::Time ros_time_now = this->now();
+
+  diagnostics_trigger_node_->clear();
+  diagnostics_trigger_node_->add_key_value("service_call_time_stamp", ros_time_now.nanoseconds());
+
   is_activated_ = req->data;
   if (is_activated_) {
     initial_pose_buffer_->clear();
   }
   res->success = true;
+
+  diagnostics_trigger_node_->add_key_value("is_activated", static_cast<bool>(is_activated_));
+  diagnostics_trigger_node_->add_key_value("is_succeed_service", res->success);
+  diagnostics_trigger_node_->publish(ros_time_now);
 }
 
 void NDTScanMatcher::service_ndt_align(
   const autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped::Request::SharedPtr req,
   autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped::Response::SharedPtr res)
 {
+  const rclcpp::Time ros_time_now = this->now();
+
+  diagnostics_ndt_align_->clear();
+
+  diagnostics_ndt_align_->add_key_value("service_call_time_stamp", ros_time_now.nanoseconds());
+
   service_ndt_align_main(req, res);
+
+  // check is_succeed_service
+  bool is_succeed_service = res->success;
+  diagnostics_ndt_align_->add_key_value("is_succeed_service", is_succeed_service);
+  if (!is_succeed_service) {
+    std::stringstream message;
+    message << "ndt_align_service is failed.";
+    diagnostics_ndt_align_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+  }
+
+  diagnostics_ndt_align_->publish(ros_time_now);
 }
 
 void NDTScanMatcher::service_ndt_align_main(
@@ -808,36 +1076,50 @@ void NDTScanMatcher::service_ndt_align_main(
     // "gnss_link" instead of "map". The ndt_align is designed to return identity when this issue
     // occurs. However, in the future, converting to a non-existent frame_id should be prohibited.
 
+    diagnostics_ndt_align_->add_key_value("is_succeed_transform_initial_pose", false);
+
     std::stringstream message;
     message << "Please publish TF " << target_frame.c_str() << " to " << source_frame.c_str();
+    diagnostics_ndt_align_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::ERROR, message.str());
     RCLCPP_ERROR_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
     res->success = false;
     return;
   }
+  diagnostics_ndt_align_->add_key_value("is_succeed_transform_initial_pose", true);
 
   // transform pose_frame to map_frame
   auto initial_pose_msg_in_map_frame =
     autoware::localization_util::transform(req->pose_with_covariance, transform_s2t);
   initial_pose_msg_in_map_frame.header.stamp = req->pose_with_covariance.header.stamp;
   auto result = map_update_module_->update_map(initial_pose_msg_in_map_frame.pose.pose.position);
+  apply_diagnostics_update(*diagnostics_ndt_align_, result.diagnostics);
 
   publish_loaded_map_if_present(result, this->now());
 
   ndt_ptr_.with([&](auto & ndt_ptr) {
     // check is_set_map_points
-    if (!ndt_ptr->hasTarget()) {
-      RCLCPP_WARN_STREAM_THROTTLE(
-        this->get_logger(), *this->get_clock(), 1000,
-        "No InputTarget. Please check the map file and the map_loader service");
+    bool is_set_map_points = ndt_ptr->hasTarget();
+    diagnostics_ndt_align_->add_key_value("is_set_map_points", is_set_map_points);
+    if (!is_set_map_points) {
+      std::stringstream message;
+      message << "No InputTarget. Please check the map file and the map_loader service";
+      diagnostics_ndt_align_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
       res->success = false;
       return;
     }
 
     // check is_set_sensor_points
-    if (sensor_points_in_baselink_frame_ == nullptr) {
-      RCLCPP_WARN_STREAM_THROTTLE(
-        this->get_logger(), *this->get_clock(), 1000,
-        "No InputSource. Please check the input lidar topic");
+    bool is_set_sensor_points = (sensor_points_in_baselink_frame_ != nullptr);
+    diagnostics_ndt_align_->add_key_value("is_set_sensor_points", is_set_sensor_points);
+    if (!is_set_sensor_points) {
+      std::stringstream message;
+      message << "No InputSource. Please check the input lidar topic";
+      diagnostics_ndt_align_->update_level_and_message(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
       res->success = false;
       return;
     }
@@ -959,6 +1241,7 @@ std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> NDTScanMatcher
 
   autoware::localization_util::output_pose_with_cov_to_log(
     get_logger(), "align_pose_output", result_pose_with_cov_msg);
+  diagnostics_ndt_align_->add_key_value("best_particle_score", best_particle_ptr->score);
 
   return std::make_tuple(result_pose_with_cov_msg, best_particle_ptr->score);
 }

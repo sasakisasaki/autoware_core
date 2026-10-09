@@ -25,11 +25,15 @@
 
 #include <pcl/point_types.h>
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace autoware::ndt_scan_matcher
 {
@@ -53,10 +57,50 @@ public:
   using PcdLoaderFunction = std::function<GetDifferentialPointCloudMap::Response::ConstSharedPtr(
     const GetDifferentialPointCloudMap::Request::SharedPtr &)>;
 
-  // Result of a map update entry point: whether the NDT map changed.
+  // Severity of a diagnostics update. Mirrors diagnostic_msgs::msg::DiagnosticStatus levels so
+  // this module needs no ROS diagnostics dependency.
+  enum class DiagnosticLevel : int8_t { OK = 0, WARN = 1, ERROR = 2, STALE = 3 };
+
+  // A single diagnostic key/value. The value keeps its type so the ROS node can format it exactly
+  // the way DiagnosticsInterface would (e.g. bool as "True"/"False").
+  struct DiagnosticKeyValue
+  {
+    std::string key;
+    std::variant<bool, int64_t, double, std::string> value;
+  };
+
+  // Diagnostics accumulated while updating the map: key/values plus an overall status (level +
+  // message). Returned to the ROS node, which forwards it to a DiagnosticsInterface. Plain data,
+  // kept ROS-free on purpose.
+  struct DiagnosticsReport
+  {
+    DiagnosticLevel level{DiagnosticLevel::OK};
+    std::string message;
+    std::vector<DiagnosticKeyValue> key_values;
+
+    void add_key_value(DiagnosticKeyValue key_value) { key_values.push_back(std::move(key_value)); }
+
+    // Accumulates like DiagnosticsInterface: raises the level and appends the message.
+    void update_level_and_message(DiagnosticLevel new_level, const std::string & new_message)
+    {
+      if (static_cast<int8_t>(new_level) > static_cast<int8_t>(DiagnosticLevel::OK)) {
+        if (!message.empty()) {
+          message += "; ";
+        }
+        message += new_message;
+      }
+      if (static_cast<int8_t>(new_level) > static_cast<int8_t>(level)) {
+        level = new_level;
+      }
+    }
+  };
+
+  // Result of a map update entry point: whether the NDT map changed, plus the diagnostics to
+  // report for this call.
   struct UpdateResult
   {
     bool map_updated{false};
+    DiagnosticsReport diagnostics;
     // The merged loaded point cloud map for debugging. Set only when publish_loaded_map is enabled
     // and the map was updated; the ROS node publishes it as-is.
     std::optional<sensor_msgs::msg::PointCloud2> loaded_pcd_map;
@@ -83,20 +127,25 @@ private:
   UpdateResult callback_timer(const geometry_msgs::msg::Point & position);
 
   [[nodiscard]] bool should_update_map(
-    BuilderState & builder_state, const geometry_msgs::msg::Point & position);
+    BuilderState & builder_state, const geometry_msgs::msg::Point & position,
+    DiagnosticsReport & diagnostics);
 
   // Returns true if the NDT map was actually updated.
   bool update_map_internal(
-    BuilderState & builder_state, const geometry_msgs::msg::Point & position);
+    BuilderState & builder_state, const geometry_msgs::msg::Point & position,
+    DiagnosticsReport & diagnostics);
 
   // Do not call this function while holding the lock for ndt_ptr_.
   UpdateResult update_map(const geometry_msgs::msg::Point & position);
   // Update the specified NDT
-  bool update_ndt(const geometry_msgs::msg::Point & position, NdtType & ndt);
+  bool update_ndt(
+    const geometry_msgs::msg::Point & position, NdtType & ndt, DiagnosticsReport & diagnostics);
 
   // Concatenates the cells kept in loaded_pcd_map_ into a single cloud for the debug publish.
-  // A cell that cannot be concatenated (mismatching field layout) is skipped.
-  [[nodiscard]] sensor_msgs::msg::PointCloud2 merge_loaded_pcd_map() const;
+  // A cell that cannot be concatenated (mismatching field layout) is skipped and reported as a
+  // WARN in the given diagnostics.
+  [[nodiscard]] sensor_msgs::msg::PointCloud2 merge_loaded_pcd_map(
+    DiagnosticsReport & diagnostics) const;
 
   PcdLoaderFunction pcd_loader_;
 
