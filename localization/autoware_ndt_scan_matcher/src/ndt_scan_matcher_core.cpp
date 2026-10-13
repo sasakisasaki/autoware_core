@@ -15,6 +15,7 @@
 #include "ndt_scan_matcher_helper.hpp"
 #include "scan_match_covariance.hpp"
 #include "scan_match_evaluation.hpp"
+#include "scan_match_no_ground_score.hpp"
 
 #include <autoware/localization_util/matrix_type.hpp>
 #include <autoware/localization_util/tree_structured_parzen_estimator.hpp>
@@ -45,6 +46,7 @@
 #include <future>
 #include <iomanip>
 #include <map>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -647,40 +649,20 @@ bool NDTScanMatcher::callback_sensor_points_main(
     }
 
     // whether use no ground points to calculate score
-    if (param_.score_estimation.no_ground_points.enable) {
-      // remove ground
-      pcl::shared_ptr<pcl::PointCloud<PointSource>> no_ground_points_in_map_ptr(
-        new pcl::PointCloud<PointSource>);
-      no_ground_points_in_map_ptr->points.reserve(sensor_points_in_map_ptr->size());
-      // The aligned pose z is constant over the loop; the translation z of the 4x4 matrix equals
-      // matrix4f_to_pose(ndt_result.pose).position.z. Hoist it to avoid rebuilding a full Pose
-      // (including a quaternion extraction) for every point in the scan.
-      const double result_pose_z = ndt_result.pose(2, 3);
-      for (std::size_t i = 0; i < sensor_points_in_map_ptr->size(); i++) {
-        const float point_z = sensor_points_in_map_ptr->points[i].z;  // NOLINT
-        if (
-          point_z - result_pose_z >
-          param_.score_estimation.no_ground_points.z_margin_for_ground_removal) {
-          no_ground_points_in_map_ptr->points.push_back(sensor_points_in_map_ptr->points[i]);
-        }
-      }
-      // pub remove-ground points
+    const std::optional<NoGroundScore> no_ground_score = score_no_ground_points(
+      *sensor_points_in_map_ptr, ndt_result.pose, param_.score_estimation.no_ground_points,
+      *ndt_ptr);
+    if (no_ground_score) {
       auto no_ground_points_msg_in_map =
         ALLOCATE_OUTPUT_MESSAGE_UNIQUE(no_ground_points_aligned_pose_pub_);
-      pcl::toROSMsg(*no_ground_points_in_map_ptr, *no_ground_points_msg_in_map);
+      pcl::toROSMsg(*no_ground_score->points_in_map, *no_ground_points_msg_in_map);
       no_ground_points_msg_in_map->header.stamp = sensor_ros_time;
       no_ground_points_msg_in_map->header.frame_id = param_.frame.map_frame;
       no_ground_points_aligned_pose_pub_->publish(std::move(no_ground_points_msg_in_map));
-      // calculate score
-      const auto no_ground_transform_probability = static_cast<float>(
-        ndt_ptr->calculateTransformationProbability(*no_ground_points_in_map_ptr));
-      const auto no_ground_nearest_voxel_transformation_likelihood = static_cast<float>(
-        ndt_ptr->calculateNearestVoxelTransformationLikelihood(*no_ground_points_in_map_ptr));
-      // pub score
       no_ground_transform_probability_pub_->publish(
-        make_float32_stamped(sensor_ros_time, no_ground_transform_probability));
-      no_ground_nearest_voxel_transformation_likelihood_pub_->publish(
-        make_float32_stamped(sensor_ros_time, no_ground_nearest_voxel_transformation_likelihood));
+        make_float32_stamped(sensor_ros_time, no_ground_score->transform_probability));
+      no_ground_nearest_voxel_transformation_likelihood_pub_->publish(make_float32_stamped(
+        sensor_ros_time, no_ground_score->nearest_voxel_transformation_likelihood));
     }
 
     return is_converged;
