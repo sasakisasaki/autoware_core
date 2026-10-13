@@ -13,10 +13,10 @@
 // limitations under the License.
 
 #include "../src/scan_match_no_ground_score.hpp"
+#include "ndt_test_map.hpp"
 
 #include <gtest/gtest.h>
 
-#include <memory>
 #include <vector>
 
 namespace autoware::ndt_scan_matcher
@@ -24,7 +24,7 @@ namespace autoware::ndt_scan_matcher
 namespace
 {
 
-using NdtType = pclomp::MultiGridNormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>;
+using test::NdtType;
 using PointCloud = pcl::PointCloud<pcl::PointXYZ>;
 
 HyperParameters::ScoreEstimation::NoGroundPoints make_param(const double z_margin)
@@ -61,38 +61,15 @@ std::vector<float> heights_of(const PointCloud & cloud)
   return heights;
 }
 
-/// An NDT with a target map of a floor plus four walls, so the non-ground points score against
-/// real voxels.
+/// An NDT with a target map, so the non-ground points score against real voxels.
 class ScanMatchNoGroundScoreTest : public ::testing::Test
 {
 protected:
   void SetUp() override
   {
-    pclomp::NdtParams ndt_params{};
-    ndt_params.trans_epsilon = 0.01;
-    ndt_params.step_size = 0.1;
-    ndt_params.resolution = 2.0F;
-    ndt_params.max_iterations = 30;
-    ndt_params.num_threads = 1;
-    ndt_params.regularization_scale_factor = 0.0F;
-    ndt_.setParams(ndt_params);
-
-    auto map = std::make_shared<PointCloud>();
-    constexpr float half_size = 10.0F;
-    constexpr float step = 0.5F;
-    for (float a = -half_size; a <= half_size; a += step) {
-      for (float b = -half_size; b <= half_size; b += step) {
-        map->push_back(pcl::PointXYZ(a, b, 0.0F));
-      }
-      for (float z = 0.0F; z <= 3.0F; z += step) {
-        map->push_back(pcl::PointXYZ(a, half_size, z));
-        map->push_back(pcl::PointXYZ(a, -half_size, z));
-        map->push_back(pcl::PointXYZ(half_size, a, z));
-        map->push_back(pcl::PointXYZ(-half_size, a, z));
-      }
-    }
-    ndt_.addTarget(map, "0");
-    ndt_.createVoxelKdtree();
+    ndt_.setParams(test::make_test_ndt_params());
+    const auto map = test::make_room_map();
+    test::set_target_map(ndt_, map);
     map_ = map;
   }
 
