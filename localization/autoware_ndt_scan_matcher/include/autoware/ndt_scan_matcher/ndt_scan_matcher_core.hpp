@@ -65,6 +65,8 @@
 
 namespace autoware::ndt_scan_matcher
 {
+struct ScanMatchCovariance;
+
 using DiagnosticsInterface =
   autoware_utils_diagnostics::BasicDiagnosticsInterface<autoware::agnocast_wrapper::Node>;
 
@@ -146,9 +148,9 @@ private:
   void publish_loaded_map_if_present(
     MapUpdateModule::UpdateResult & result, const rclcpp::Time & stamp) const;
 
-  Eigen::Matrix2d estimate_covariance(
-    const pclomp::NdtResult & ndt_result, const Eigen::Matrix4f & initial_pose_matrix,
-    const rclcpp::Time & sensor_ros_time, NormalDistributionsTransform & ndt_ref);
+  // Publishes the poses the covariance estimator searched, for the estimators that report them.
+  void publish_multi_poses(
+    const rclcpp::Time & sensor_ros_time, const ScanMatchCovariance & covariance_result);
 
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr visualize_point_score(
     const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr,
