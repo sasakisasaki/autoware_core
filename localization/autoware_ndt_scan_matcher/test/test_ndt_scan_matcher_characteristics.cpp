@@ -225,6 +225,40 @@ bool wait_for_capture_discovery(NdtHarness & harness, const Captures &... captur
   return harness.wait_until([&] { return (... && (captures->publisher_count() >= 1)); }, 10s);
 }
 
+/// The two topics that witness a scan reaching the end of its callback: the pose it estimated and
+/// the cloud it aligned.
+///
+/// Both stay silent whenever a gate short-circuits the callback -- whichever gate it was. Silence
+/// therefore proves that *a* gate stopped the scan, never *which* one; that discrimination is what
+/// the diagnostics keys provide, and what has to survive the diagnostics rework in some form.
+struct ScanOutputCapture
+{
+  std::shared_ptr<TopicCapture<geometry_msgs::msg::PoseStamped>> ndt_pose;
+  std::shared_ptr<TopicCapture<sensor_msgs::msg::PointCloud2>> points_aligned;
+};
+
+/// Subscribe to both outputs. Call before driving the scan, or silence proves nothing.
+ScanOutputCapture capture_scan_outputs(NdtHarness & harness)
+{
+  return {
+    harness.capture<geometry_msgs::msg::PoseStamped>("/ndt_pose"),
+    harness.capture<sensor_msgs::msg::PointCloud2>("/points_aligned")};
+}
+
+/// Wait until both captures have found a publisher, so later silence is evidence rather than
+/// unfinished discovery.
+bool wait_for_scan_output_discovery(NdtHarness & harness, const ScanOutputCapture & capture)
+{
+  return wait_for_capture_discovery(harness, capture.ndt_pose, capture.points_aligned);
+}
+
+/// A gate stopped the callback: neither output received anything.
+void expect_scan_published_nothing(const ScanOutputCapture & capture)
+{
+  EXPECT_EQ(capture.ndt_pose->count(), 0U) << "a pose was published despite the gate";
+  EXPECT_EQ(capture.points_aligned->count(), 0U) << "a cloud was aligned despite the gate";
+}
+
 /// Did the node broadcast `map -> ndt_base_link` on `/tf`?
 bool has_ndt_base_link_transform(const TopicCapture<tf2_msgs::msg::TFMessage> & capture)
 {
@@ -250,6 +284,8 @@ TEST(NdtScanMatcherCharacteristics, EmptyScanIsRejectedWithWarning)
 {
   // Arrange
   auto harness = make_ready_harness();
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
 
   ScanDrive drive;
   drive.make_cloud = [](const builtin_interfaces::msg::Time & stamp) {
@@ -266,6 +302,8 @@ TEST(NdtScanMatcherCharacteristics, EmptyScanIsRejectedWithWarning)
   EXPECT_EQ(diag.level(), level_warn);
   EXPECT_TRUE(contains(diag.message(), "Sensor points is empty."))
     << "message was: " << diag.message();
+
+  expect_scan_published_nothing(outputs);
 }
 
 /// Looks like a bug — a late scan only warns; the early return is commented out on purpose.
@@ -302,6 +340,8 @@ TEST(NdtScanMatcherCharacteristics, ScanWithoutTransformIsError)
 {
   // Arrange
   auto harness = make_ready_harness();
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
 
   ScanDrive drive;
   drive.make_cloud = [](const builtin_interfaces::msg::Time & stamp) {
@@ -322,6 +362,8 @@ TEST(NdtScanMatcherCharacteristics, ScanWithoutTransformIsError)
   EXPECT_FALSE(diag.has_key("sensor_points_max_distance"))
     << "the callback ran past a failed transform. keys: "
     << ::testing::PrintToString(diag.keys_in_order());
+
+  expect_scan_published_nothing(outputs);
 }
 
 /// The near-field gate runs *before* the activation check; the absent `is_activated` is the only
@@ -333,6 +375,8 @@ TEST(NdtScanMatcherCharacteristics, NearFieldScanIsRejectedBeforeActivationCheck
   constexpr double required_distance = 10.0;
   auto harness =
     make_ready_harness({rclcpp::Parameter("sensor_points.required_distance", required_distance)});
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
 
   ScanDrive drive;
   drive.make_cloud = [](const builtin_interfaces::msg::Time & stamp) {
@@ -351,6 +395,8 @@ TEST(NdtScanMatcherCharacteristics, NearFieldScanIsRejectedBeforeActivationCheck
   EXPECT_FALSE(diag.has_key("is_activated"))
     << "the distance gate no longer precedes the activation gate. keys: "
     << ::testing::PrintToString(diag.keys_in_order());
+
+  expect_scan_published_nothing(outputs);
 }
 
 /// Looks like a bug — the scan is stored one line *before* the activation gate rejects it. Moving
@@ -388,6 +434,8 @@ TEST(NdtScanMatcherCharacteristics, MissingInitialPoseAbortsBeforeMapCheck)
 {
   // Arrange
   auto harness = make_ready_harness();
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
   ASSERT_EQ(harness->activate(), std::optional<bool>(true));
 
   // Act
@@ -402,6 +450,8 @@ TEST(NdtScanMatcherCharacteristics, MissingInitialPoseAbortsBeforeMapCheck)
   EXPECT_FALSE(diag.has_key("is_set_map_points"))
     << "interpolation no longer short-circuits the map check. keys: "
     << ::testing::PrintToString(diag.keys_in_order());
+
+  expect_scan_published_nothing(outputs);
 }
 
 /// With no map loaded the scan aborts before alignment — the absent `iteration_num` witnesses
@@ -410,6 +460,8 @@ TEST(NdtScanMatcherCharacteristics, MissingMapAbortsBeforeAlignment)
 {
   // Arrange
   auto harness = make_ready_harness();
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
   ASSERT_EQ(harness->activate(), std::optional<bool>(true));
 
   ScanDrive drive;
@@ -427,6 +479,8 @@ TEST(NdtScanMatcherCharacteristics, MissingMapAbortsBeforeAlignment)
   EXPECT_EQ(diag.level(), level_warn);
   EXPECT_FALSE(diag.has_key("iteration_num"))
     << "alignment ran without a map. keys: " << ::testing::PrintToString(diag.keys_in_order());
+
+  expect_scan_published_nothing(outputs);
 }
 
 // ---------------------------------------------------------------------------------------------
