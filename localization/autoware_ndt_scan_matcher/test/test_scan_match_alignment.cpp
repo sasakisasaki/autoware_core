@@ -58,6 +58,29 @@ protected:
   pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> map_;
 };
 
+/// `align_scan` aligns the room map onto itself, so the true pose is the identity and a start pose
+/// offset from it must converge back.
+class AlignScanTest : public ::testing::Test
+{
+protected:
+  void SetUp() override
+  {
+    ndt_.setParams(test::make_test_ndt_params());
+    map_ = test::make_room_map();
+  }
+
+  static Eigen::Matrix4f translation(const float x, const float y)
+  {
+    Eigen::Matrix4f pose = Eigen::Matrix4f::Identity();
+    pose(0, 3) = x;
+    pose(1, 3) = y;
+    return pose;
+  }
+
+  test::NdtType ndt_;
+  pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> map_;
+};
+
 }  // namespace
 
 // A pose regularizes the next alignment.
@@ -97,6 +120,74 @@ TEST_F(ApplyRegularizationPoseTest, NewPoseReplacesPrevious)  // NOLINT
 
   EXPECT_EQ(replaced.hessian, expected.hessian);
   EXPECT_EQ(replaced.pose, expected.pose);
+}
+
+// Without a target map there is nothing to align against, which the node reports as
+// `is_set_map_points`.
+TEST_F(AlignScanTest, NoTargetMapReturnsNullopt)  // NOLINT
+{
+  ASSERT_FALSE(ndt_.hasTarget());
+
+  EXPECT_FALSE(align_scan(ndt_, map_, Eigen::Matrix4f::Identity(), std::nullopt).has_value());
+}
+
+// A start pose offset from the truth converges back to it.
+TEST_F(AlignScanTest, AlignsFromOffsetStartToTruePose)  // NOLINT
+{
+  test::set_target_map(ndt_, map_);
+
+  const std::optional<pclomp::NdtResult> result =
+    align_scan(ndt_, map_, translation(0.5F, -0.5F), std::nullopt);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_NEAR(result->pose(0, 3), 0.0F, 0.1F);
+  EXPECT_NEAR(result->pose(1, 3), 0.0F, 0.1F);
+  EXPECT_GT(result->iteration_num, 0);
+}
+
+// The regularization pose is applied by `align_scan` itself, so the node no longer has to.
+TEST_F(AlignScanTest, RegularizationPoseReachesAlignment)  // NOLINT
+{
+  auto ndt_params = test::make_test_ndt_params();
+  ndt_params.regularization_scale_factor = 1.0F;
+  ndt_.setParams(ndt_params);
+  test::set_target_map(ndt_, map_);
+
+  const std::optional<pclomp::NdtResult> unregularized =
+    align_scan(ndt_, map_, Eigen::Matrix4f::Identity(), std::nullopt);
+  const std::optional<pclomp::NdtResult> regularized =
+    align_scan(ndt_, map_, Eigen::Matrix4f::Identity(), translation(1.0F, 0.0F));
+
+  ASSERT_TRUE(unregularized.has_value());
+  ASSERT_TRUE(regularized.has_value());
+  EXPECT_FALSE(regularized->hessian.isApprox(unregularized->hessian))
+    << "align_scan did not apply the regularization pose";
+}
+
+// What the node used to do inline -- align into a throwaway cloud, then getResult -- gives the same
+// result as the extracted function.
+TEST_F(AlignScanTest, MatchesManualAlignAndGetResult)  // NOLINT
+{
+  const Eigen::Matrix4f initial_pose = translation(0.3F, 0.2F);
+
+  test::NdtType manual_ndt;
+  manual_ndt.setParams(test::make_test_ndt_params());
+  test::set_target_map(manual_ndt, map_);
+  pcl::PointCloud<pcl::PointXYZ> output_cloud;
+  manual_ndt.align(output_cloud, initial_pose, map_);
+  const pclomp::NdtResult expected = manual_ndt.getResult();
+
+  test::set_target_map(ndt_, map_);
+  const std::optional<pclomp::NdtResult> actual =
+    align_scan(ndt_, map_, initial_pose, std::nullopt);
+
+  ASSERT_TRUE(actual.has_value());
+  EXPECT_EQ(actual->pose, expected.pose);
+  EXPECT_EQ(actual->iteration_num, expected.iteration_num);
+  EXPECT_EQ(actual->transform_probability, expected.transform_probability);
+  EXPECT_EQ(
+    actual->nearest_voxel_transformation_likelihood,
+    expected.nearest_voxel_transformation_likelihood);
 }
 
 }  // namespace autoware::ndt_scan_matcher

@@ -18,6 +18,7 @@
 #include <Eigen/Core>
 
 #include <autoware/ndt_scan_matcher/ndt_omp/multigrid_ndt_omp.h>
+#include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
 #include <optional>
@@ -38,6 +39,28 @@ namespace autoware::ndt_scan_matcher
 void apply_regularization_pose(
   pclomp::MultiGridNormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> & ndt,
   const std::optional<Eigen::Matrix4f> & regularization_pose);
+
+/**
+ * \brief Align one scan against the NDT's target map.
+ *
+ * Applies \p regularization_pose, refuses to run without a target map, then aligns and collects the
+ * result. No ROS node, clock, TF or publisher is involved: preparing the inputs (interpolating the
+ * initial pose at the scan time, transforming the scan into the base_link frame) and reporting the
+ * missing map are the node's job.
+ *
+ * The NDT is left holding this alignment's state, which the covariance estimators then reuse.
+ *
+ * \param ndt                 the NDT to align against; must hold the lock the node guards it with.
+ * \param source              the sensor points in the base_link frame.
+ * \param initial_pose        the pose to start the search from, as a 4x4 homogeneous transform.
+ * \param regularization_pose the pose to regularize towards, or std::nullopt for none.
+ * \return the alignment result, or std::nullopt when no map is set, in which case the NDT is
+ *         untouched apart from the regularization pose.
+ */
+std::optional<pclomp::NdtResult> align_scan(
+  pclomp::MultiGridNormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> & ndt,
+  const pcl::shared_ptr<const pcl::PointCloud<pcl::PointXYZ>> & source,
+  const Eigen::Matrix4f & initial_pose, const std::optional<Eigen::Matrix4f> & regularization_pose);
 
 }  // namespace autoware::ndt_scan_matcher
 

@@ -518,10 +518,11 @@ bool NDTScanMatcher::callback_sensor_points_main(
     const SmartPoseBuffer::InterpolateResult & interpolation_result =
       interpolation_result_opt.value();
 
-    // if regularization is enabled and available, set pose to NDT for regularization
-    if (param_.ndt_regularization_enable) {
-      apply_regularization_pose(*ndt_ptr, interpolate_regularization_pose(sensor_ros_time));
-    }
+    // if regularization is enabled and available, look up the pose to regularize towards. The
+    // buffer only exists when regularization is enabled, so the check stays here.
+    const std::optional<Eigen::Matrix4f> regularization_pose =
+      param_.ndt_regularization_enable ? interpolate_regularization_pose(sensor_ros_time)
+                                       : std::nullopt;
 
     // Warn if the lidar has gone out of the map range
     if (map_update_module_->out_of_map_range(
@@ -535,8 +536,14 @@ bool NDTScanMatcher::callback_sensor_points_main(
       RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, msg.str());
     }
 
+    // perform ndt scan matching
+    const Eigen::Matrix4f initial_pose_matrix =
+      pose_to_matrix4f(interpolation_result.interpolated_pose.pose.pose);
+    const std::optional<pclomp::NdtResult> ndt_result_opt = align_scan(
+      *ndt_ptr, sensor_points_in_baselink_frame_, initial_pose_matrix, regularization_pose);
+
     // check is_set_map_points
-    const bool is_set_map_points = ndt_ptr->hasTarget();
+    const bool is_set_map_points = ndt_result_opt.has_value();
     diagnostics_scan_points_->add_key_value("is_set_map_points", is_set_map_points);
     if (!is_set_map_points) {
       std::stringstream message;
@@ -546,12 +553,7 @@ bool NDTScanMatcher::callback_sensor_points_main(
       return false;
     }
 
-    // perform ndt scan matching
-    const Eigen::Matrix4f initial_pose_matrix =
-      pose_to_matrix4f(interpolation_result.interpolated_pose.pose.pose);
-    auto output_cloud = std::make_shared<pcl::PointCloud<PointSource>>();
-    ndt_ptr->align(*output_cloud, initial_pose_matrix, sensor_points_in_baselink_frame_);
-    const pclomp::NdtResult ndt_result = ndt_ptr->getResult();
+    const pclomp::NdtResult & ndt_result = ndt_result_opt.value();
 
     const geometry_msgs::msg::Pose result_pose_msg = matrix4f_to_pose(ndt_result.pose);
     std::vector<geometry_msgs::msg::Pose> transformation_msg_array;

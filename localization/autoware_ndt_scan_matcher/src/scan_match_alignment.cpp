@@ -27,4 +27,22 @@ void apply_regularization_pose(
   }
 }
 
+std::optional<pclomp::NdtResult> align_scan(
+  pclomp::MultiGridNormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> & ndt,
+  const pcl::shared_ptr<const pcl::PointCloud<pcl::PointXYZ>> & source,
+  const Eigen::Matrix4f & initial_pose, const std::optional<Eigen::Matrix4f> & regularization_pose)
+{
+  apply_regularization_pose(ndt, regularization_pose);
+
+  if (!ndt.hasTarget()) {
+    return std::nullopt;
+  }
+
+  // The aligned cloud is a by-product: callers rescore from `getResult().pose` instead, so it is
+  // discarded here rather than returned.
+  pcl::PointCloud<pcl::PointXYZ> output_cloud;
+  ndt.align(output_cloud, initial_pose, source);
+  return ndt.getResult();
+}
+
 }  // namespace autoware::ndt_scan_matcher
