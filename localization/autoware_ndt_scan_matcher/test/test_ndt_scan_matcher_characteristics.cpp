@@ -252,6 +252,20 @@ bool wait_for_scan_output_discovery(NdtHarness & harness, const ScanOutputCaptur
   return wait_for_capture_discovery(harness, capture.ndt_pose, capture.points_aligned);
 }
 
+/// The callback ran to the end: exactly one pose and one aligned cloud went out.
+///
+/// For the skip counter this is the observable face of `is_succeed_scan_matching`: the counter
+/// resets on exactly the condition that lets a pose be published.
+void expect_scan_published_pose(
+  NdtHarness & harness, const ScanOutputCapture & capture, const ScanOutcome & outcome)
+{
+  ASSERT_TRUE(harness.wait_until(
+    [&] { return capture.ndt_pose->count() >= 1 && capture.points_aligned->count() >= 1; }, 5s))
+    << "the scan was expected to publish, but nothing arrived";
+  EXPECT_EQ(capture.ndt_pose->count(), 1U) << "scan drive attempt was " << outcome.attempt;
+  EXPECT_EQ(capture.points_aligned->count(), 1U);
+}
+
 /// A gate stopped the callback: neither output received anything.
 void expect_scan_published_nothing(const ScanOutputCapture & capture)
 {
@@ -729,6 +743,8 @@ TEST(NdtScanMatcherCharacteristics, SkipCounterWarnsWhenItReachesThreshold)
   auto harness = make_ready_harness(
     {rclcpp::Parameter("validation.skipping_publish_num", 1),
      rclcpp::Parameter("sensor_points.required_distance", 10.0)});
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
 
   ScanDrive near_field;
   near_field.make_cloud = [](const builtin_interfaces::msg::Time & stamp) {
@@ -751,6 +767,7 @@ TEST(NdtScanMatcherCharacteristics, SkipCounterWarnsWhenItReachesThreshold)
   EXPECT_EQ(diag.level(), level_warn);
   EXPECT_TRUE(contains(diag.message(), "skipping_publish_num exceed limit"))
     << "message was: " << diag.message();
+  expect_scan_published_nothing(outputs);
 }
 
 /// A converged scan reports exactly these nineteen diagnostics keys.
@@ -1027,6 +1044,8 @@ TEST(NdtScanMatcherCharacteristics, ConvergedScanResetsSkipCounter)
 {
   // Arrange
   auto harness = make_ready_harness(converged_hot_path_overrides());
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
   ASSERT_TRUE(harness->ensure_map_loaded());
 
   auto rejected = default_drive();
@@ -1045,6 +1064,9 @@ TEST(NdtScanMatcherCharacteristics, ConvergedScanResetsSkipCounter)
   ASSERT_EQ(outcome->diag.level(), level_ok)
     << "scan did not converge: " << outcome->diag.message();
   EXPECT_EQ(outcome->diag.value("skipping_publish_num"), "0");
+  // Only the converged scan published; the rejected one before it did not. That asymmetry is the
+  // reset condition itself, seen from outside the node.
+  expect_scan_published_pose(*harness, outputs, *outcome);
 }
 
 /// With TRANSFORM_PROBABILITY selected, its own threshold decides convergence.
@@ -1206,6 +1228,9 @@ TEST(NdtScanMatcherCharacteristics, RejectedInitialPoseUpdatesNeitherBufferNorMa
   auto harness = make_ready_harness();
   ASSERT_EQ(harness->activate(), std::optional<bool>(true));
 
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
+
   // Only wrong-frame poses are ever published.
   ScanDrive drive;
   drive.initial_pose = InitialPoseSpec{};
@@ -1231,6 +1256,10 @@ TEST(NdtScanMatcherCharacteristics, RejectedInitialPoseUpdatesNeitherBufferNorMa
 
   EXPECT_EQ(diag->value("is_set_last_update_position"), "False");
   EXPECT_EQ(diag->level(), level_warn);
+
+  // Both side effects seen from outside: with nothing in the buffer the scan cannot interpolate,
+  // so it reaches neither output.
+  expect_scan_published_nothing(outputs);
 }
 // ---------------------------------------------------------------------------------------------
 // 3. Align service - `ndt_align_srv`, the path `autoware_pose_initializer` uses. These are the
