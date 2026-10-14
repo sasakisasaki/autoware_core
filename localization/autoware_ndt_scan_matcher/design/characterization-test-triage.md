@@ -198,11 +198,61 @@ an assertion change, so it does not belong in 2a.
 - 26, 27, 28 — already assert `response->success`; their diagnostics assertions add only the
   which-gate discrimination.
 
-## Remaining in 2a
+## 2a complete: 9 cases converted
 
-| Group | Cases | Approach |
+| # | Case | New observation |
 |---|---|---|
-| Scan path | 13, 19, 14 | `ScanOutputCapture`; converged cases also assert the pose went out |
-| Initial-pose path | 18, 22, 23, 24, 25 | Observe the downstream effect: a later scan interpolates or does not |
-| Align service | 26, 27, 28 | Already partly covered by `response->success`; confirm nothing else is needed |
-| Node state | 5 | The stored scan is observable through the align service succeeding while deactivated |
+| 1 | EmptyScanIsRejectedWithWarning | both outputs silent |
+| 3 | ScanWithoutTransformIsError | both outputs silent |
+| 4 | NearFieldScanIsRejectedBeforeActivationCheck | both outputs silent |
+| 6 | MissingInitialPoseAbortsBeforeMapCheck | both outputs silent |
+| 7 | MissingMapAbortsBeforeAlignment | both outputs silent |
+| 13 | SkipCounterWarnsWhenItReachesThreshold | both scans rejected, nothing published |
+| 18 | InitialPoseDistanceToleranceReachesInterpolationBuffer | both outputs silent |
+| 19 | ConvergedScanResetsSkipCounter | exactly one pose out, from the converged scan only |
+| 25 | RejectedInitialPoseUpdatesNeitherBufferNorMapAnchor | the following scan reaches neither output |
+
+Plus 11 cases that already had a non-diagnostics observation, and 2 (30, 31) that never used
+diagnostics at all. Suite green throughout; assertions added, none removed, production code frozen.
+
+## The residue: what cannot be re-expressed
+
+This is 2a's real deliverable — the specification input for the minimal diagnostics set.
+
+| # | Case | Why topics cannot replace it |
+|---|---|---|
+| 2 | StaleScanWarnsButProcessingContinues | The stale stamp also defeats interpolation, so the scan publishes nothing either way. "Continues" means only "past the latency gate". Needs a stimulus that supplies initial poses at the stale stamp |
+| 14 | ScanMatchingStatusEmitsExactlyTheseNineteenKeys | It *is* the diagnostics contract. Rewriting it defines the new minimal set |
+| 22 | ActivatingClearsInitialPoseBuffer | Neither arm loads a map, so both publish nothing. Distinguishing them needs `converged_hot_path_overrides` + `ensure_map_loaded` in both arms — a stimulus change |
+| 23 | InitialPoseIsRejectedBeforeFrameCheckWhenNotActivated | While deactivated a later scan aborts at the activation gate too, so the two gates look identical from outside. Slated for deletion: the core test is strictly better |
+| 24 | WrongFrameIdOnInitialPoseIsErrorNotWarn | **Severity has no non-diagnostics channel at all.** ERROR-versus-WARN is not observable on any topic. Slated for deletion: covered by `UnexpectedFrameIdIsAnErrorNotAWarning` |
+
+### Two kinds of residue
+
+- **Needs a stimulus redesign** (2, 22): convertible in principle, but changing the input is not an
+  assertion change and does not belong in an additive phase. Decide in 2c.
+- **Inherently diagnostics-shaped** (14, 23, 24): severity levels and which-gate-fired have no
+  topic equivalent. Either the minimal set keeps them, or the behaviour stops being tested at node
+  level and relies on the core tests.
+
+## Requirement this places on 2c
+
+**The minimal diagnostics set must retain gate discrimination for the scan callback**, or cases 4,
+6, 7 and 23 lose what distinguishes them. Topic silence proves that *a* gate stopped the scan,
+never *which* one.
+
+## The core suite is in scope for 2b too
+
+Four modules take `DiagnosticsReport &` — `map_update_module`, `scan_match_evaluation`,
+`scan_match_pipeline`, `initial_pose_intake`. **23 of 78 core tests assert on a report**:
+
+| Test file | Affected |
+|---|---|
+| `test_initial_pose_intake` | 7/7 |
+| `test_scan_match_evaluation` | 7/7 |
+| `test_scan_match_pipeline` | 5/5 |
+| `test_map_update_module` | 4/8 |
+
+So 2b touches roughly 29 characterization assertions *and* 23 core tests. If `DiagnosticsReport`
+survives in reduced form, most of that 23 is a trim rather than a rewrite — an argument for
+settling the minimal set early.

@@ -1018,6 +1018,8 @@ TEST(NdtScanMatcherCharacteristics, InitialPoseDistanceToleranceReachesInterpola
   // Arrange
   auto harness = make_ready_harness(converged_hot_path_overrides(
     {rclcpp::Parameter("validation.initial_pose_distance_tolerance_m", 5.0)}));
+  const auto outputs = capture_scan_outputs(*harness);
+  ASSERT_TRUE(wait_for_scan_output_discovery(*harness, outputs));
   ASSERT_EQ(harness->activate(), std::optional<bool>(true));
 
   // Rejected while activated, so the shared skip counter advances.
@@ -1037,6 +1039,7 @@ TEST(NdtScanMatcherCharacteristics, InitialPoseDistanceToleranceReachesInterpola
   EXPECT_EQ(diag.level(), level_warn);
   EXPECT_FALSE(diag.has_key("is_set_map_points"))
     << "interpolation accepted poses 6 m apart against a 5 m tolerance.";
+  expect_scan_published_nothing(outputs);
 }
 
 /// A converged scan resets the skip counter, checked after a rejected scan raised it.
