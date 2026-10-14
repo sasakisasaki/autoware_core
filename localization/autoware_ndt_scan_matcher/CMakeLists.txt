@@ -47,6 +47,7 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/ndt_scan_matcher_core.cpp
   src/ndt_scan_matcher_helper.cpp
   src/particle.cpp
+  src/scan_match_alignment.cpp
   src/scan_match_covariance.cpp
   src/scan_match_evaluation.cpp
   src/scan_match_no_ground_score.cpp
@@ -125,6 +126,12 @@ if(BUILD_TESTING)
     test/test_scan_match_evaluation.cpp
   )
   target_link_libraries(test_scan_match_evaluation ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the ROS-free alignment step, against a small synthetic map.
+  ament_auto_add_gtest(test_scan_match_alignment
+    test/test_scan_match_alignment.cpp
+  )
+  target_link_libraries(test_scan_match_alignment ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
 
   # Unit tests for the ROS-free covariance estimation. The MULTI_NDT cases align against a small
   # synthetic map, so no node or map loader is needed.

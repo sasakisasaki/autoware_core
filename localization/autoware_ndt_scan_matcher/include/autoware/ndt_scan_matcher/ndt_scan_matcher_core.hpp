@@ -57,6 +57,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -156,8 +157,10 @@ private:
     const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr,
     const float & lower_nvs, const float & upper_nvs, NormalDistributionsTransform & ndt_ref);
 
-  void add_regularization_pose(
-    const rclcpp::Time & sensor_ros_time, NormalDistributionsTransform & ndt_ref);
+  // Interpolates the regularization pose topic at the scan time, dropping poses older than it.
+  // Returns std::nullopt when no pose brackets the scan time.
+  std::optional<Eigen::Matrix4f> interpolate_regularization_pose(
+    const rclcpp::Time & sensor_ros_time);
 
   // Performs the pcd_loader service call for MapUpdateModule, returning nullptr on failure.
   MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr

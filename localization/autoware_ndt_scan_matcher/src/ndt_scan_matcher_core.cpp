@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "ndt_scan_matcher_helper.hpp"
+#include "scan_match_alignment.hpp"
 #include "scan_match_covariance.hpp"
 #include "scan_match_evaluation.hpp"
 #include "scan_match_no_ground_score.hpp"
@@ -519,7 +520,7 @@ bool NDTScanMatcher::callback_sensor_points_main(
 
     // if regularization is enabled and available, set pose to NDT for regularization
     if (param_.ndt_regularization_enable) {
-      add_regularization_pose(sensor_ros_time, *ndt_ptr);
+      apply_regularization_pose(*ndt_ptr, interpolate_regularization_pose(sensor_ros_time));
     }
 
     // Warn if the lidar has gone out of the map range
@@ -843,20 +844,18 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr NDTScanMatcher::visualize_point_score(
   return nvs_points_in_map_ptr_rgb;
 }
 
-void NDTScanMatcher::add_regularization_pose(
-  const rclcpp::Time & sensor_ros_time, NormalDistributionsTransform & ndt_ref)
+std::optional<Eigen::Matrix4f> NDTScanMatcher::interpolate_regularization_pose(
+  const rclcpp::Time & sensor_ros_time)
 {
-  ndt_ref.unsetRegularizationPose();
   std::optional<SmartPoseBuffer::InterpolateResult> interpolation_result_opt =
     regularization_pose_buffer_->interpolate(sensor_ros_time);
   if (!interpolation_result_opt) {
-    return;
+    return std::nullopt;
   }
   regularization_pose_buffer_->pop_old(sensor_ros_time);
   const SmartPoseBuffer::InterpolateResult & interpolation_result =
     interpolation_result_opt.value();
-  const Eigen::Matrix4f pose = pose_to_matrix4f(interpolation_result.interpolated_pose.pose.pose);
-  ndt_ref.setRegularizationPose(pose);
+  return pose_to_matrix4f(interpolation_result.interpolated_pose.pose.pose);
 }
 
 void NDTScanMatcher::service_trigger_node(
