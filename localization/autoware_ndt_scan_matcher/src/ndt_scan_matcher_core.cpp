@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "initial_pose_search.hpp"
 #include "ndt_scan_matcher_helper.hpp"
-#include "scan_match_alignment.hpp"
 #include "scan_match_no_ground_score.hpp"
 #include "scan_match_pipeline.hpp"
 
@@ -967,102 +967,44 @@ std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> NDTScanMatcher
   autoware::localization_util::output_pose_with_cov_to_log(
     get_logger(), "align_pose_input", initial_pose_with_cov);
 
-  const auto base_rpy = autoware::localization_util::get_rpy(initial_pose_with_cov);
-  const Eigen::Map<const autoware::localization_util::RowMatrixXd> covariance = {
-    initial_pose_with_cov.pose.covariance.data(), 6, 6};
-  const double stddev_x = std::sqrt(covariance(0, 0));
-  const double stddev_y = std::sqrt(covariance(1, 1));
-  const double stddev_z = std::sqrt(covariance(2, 2));
-  const double stddev_roll = std::sqrt(covariance(3, 3));
-  const double stddev_pitch = std::sqrt(covariance(4, 4));
-
-  // Since only yaw is uniformly sampled, we define the mean and standard deviation for the others.
-  const std::vector<double> sample_mean{
-    initial_pose_with_cov.pose.pose.position.x,  // trans_x
-    initial_pose_with_cov.pose.pose.position.y,  // trans_y
-    initial_pose_with_cov.pose.pose.position.z,  // trans_z
-    base_rpy.x,                                  // angle_x
-    base_rpy.y                                   // angle_y
-  };
-  const std::vector<double> sample_stddev{stddev_x, stddev_y, stddev_z, stddev_roll, stddev_pitch};
-
-  // Optimizing (x, y, z, roll, pitch, yaw) 6 dimensions.
-  TreeStructuredParzenEstimator tpe(
-    TreeStructuredParzenEstimator::Direction::MAXIMIZE,
-    param_.initial_pose_estimation.n_startup_trials, sample_mean, sample_stddev);
-
-  std::vector<Particle> particle_array;
-
   // publish the estimated poses in 20 times to see the progress and to avoid dropping data
   visualization_msgs::msg::MarkerArray marker_array;
   constexpr int64_t publish_num = 20;
   const int64_t publish_interval =
     std::max<int64_t>(param_.initial_pose_estimation.particles_num / publish_num, 1);
 
-  for (int64_t i = 0; i < param_.initial_pose_estimation.particles_num; i++) {
-    const TreeStructuredParzenEstimator::Input input = tpe.get_next_input();
+  const InitialPoseSearchResult search = search_initial_pose(
+    ndt_ref, sensor_points_in_baselink_frame_, initial_pose_with_cov,
+    param_.initial_pose_estimation,
+    [&](const int64_t i, const Particle & particle, const Eigen::Matrix4f & result_pose) {
+      push_debug_markers(marker_array, get_clock()->now(), param_.frame.map_frame, particle, i);
 
-    geometry_msgs::msg::Pose initial_pose;
-    initial_pose.position.x = input[0];
-    initial_pose.position.y = input[1];
-    initial_pose.position.z = input[2];
-    geometry_msgs::msg::Vector3 init_rpy;
-    init_rpy.x = input[3];
-    init_rpy.y = input[4];
-    init_rpy.z = input[5];
-    tf2::Quaternion tf_quaternion;
-    tf_quaternion.setRPY(init_rpy.x, init_rpy.y, init_rpy.z);
-    initial_pose.orientation = tf2::toMsg(tf_quaternion);
+      if (
+        (i + 1) % publish_interval == 0 ||
+        (i + 1) == param_.initial_pose_estimation.particles_num) {
+        ndt_monte_carlo_initial_pose_marker_pub_->publish(marker_array);
+        marker_array.markers.clear();
+      }
 
-    const Eigen::Matrix4f initial_pose_matrix = pose_to_matrix4f(initial_pose);
-    const pclomp::NdtResult ndt_result =
-      align_once(ndt_ref, sensor_points_in_baselink_frame_, initial_pose_matrix);
+      auto sensor_points_in_map_ptr = std::make_shared<pcl::PointCloud<PointSource>>();
+      autoware_utils_pcl::transform_pointcloud(
+        *sensor_points_in_baselink_frame_, *sensor_points_in_map_ptr, result_pose);
+      publish_point_cloud(
+        initial_pose_with_cov.header.stamp, param_.frame.map_frame, sensor_points_in_map_ptr);
+    });
 
-    Particle particle(
-      initial_pose, matrix4f_to_pose(ndt_result.pose),
-      ndt_result.nearest_voxel_transformation_likelihood, ndt_result.iteration_num);
-    particle_array.push_back(particle);
-    push_debug_markers(marker_array, get_clock()->now(), param_.frame.map_frame, particle, i);
-
-    if (
-      (i + 1) % publish_interval == 0 || (i + 1) == param_.initial_pose_estimation.particles_num) {
-      ndt_monte_carlo_initial_pose_marker_pub_->publish(marker_array);
-      marker_array.markers.clear();
-    }
-
-    const geometry_msgs::msg::Pose pose = matrix4f_to_pose(ndt_result.pose);
-    const geometry_msgs::msg::Vector3 rpy = autoware::localization_util::get_rpy(pose);
-
-    TreeStructuredParzenEstimator::Input result(6);
-    result[0] = pose.position.x;
-    result[1] = pose.position.y;
-    result[2] = pose.position.z;
-    result[3] = rpy.x;
-    result[4] = rpy.y;
-    result[5] = rpy.z;
-    tpe.add_trial(TreeStructuredParzenEstimator::Trial{result, ndt_result.transform_probability});
-
-    auto sensor_points_in_map_ptr = std::make_shared<pcl::PointCloud<PointSource>>();
-    autoware_utils_pcl::transform_pointcloud(
-      *sensor_points_in_baselink_frame_, *sensor_points_in_map_ptr, ndt_result.pose);
-    publish_point_cloud(
-      initial_pose_with_cov.header.stamp, param_.frame.map_frame, sensor_points_in_map_ptr);
-  }
-
-  auto best_particle_ptr = std::max_element(
-    std::begin(particle_array), std::end(particle_array),
-    [](const Particle & lhs, const Particle & rhs) { return lhs.score < rhs.score; });
+  const Particle & best_particle = search.best();
 
   geometry_msgs::msg::PoseWithCovarianceStamped result_pose_with_cov_msg;
   result_pose_with_cov_msg.header.stamp = initial_pose_with_cov.header.stamp;
   result_pose_with_cov_msg.header.frame_id = param_.frame.map_frame;
-  result_pose_with_cov_msg.pose.pose = best_particle_ptr->result_pose;
+  result_pose_with_cov_msg.pose.pose = best_particle.result_pose;
 
   autoware::localization_util::output_pose_with_cov_to_log(
     get_logger(), "align_pose_output", result_pose_with_cov_msg);
-  diagnostics_ndt_align_->add_key_value("best_particle_score", best_particle_ptr->score);
+  diagnostics_ndt_align_->add_key_value("best_particle_score", best_particle.score);
 
-  return std::make_tuple(result_pose_with_cov_msg, best_particle_ptr->score);
+  return std::make_tuple(result_pose_with_cov_msg, best_particle.score);
 }
 
 }  // namespace autoware::ndt_scan_matcher
