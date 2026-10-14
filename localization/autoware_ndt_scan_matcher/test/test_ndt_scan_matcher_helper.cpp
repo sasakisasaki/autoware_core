@@ -23,6 +23,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 namespace
@@ -147,4 +148,48 @@ TEST(NdtScanMatcherHelper, CountOscillationResetsOnZeroLengthStep)  // NOLINT
     poses.push_back(make_pose_xyz(x, 0.0, 0.0));
   }
   EXPECT_EQ(autoware::ndt_scan_matcher::count_oscillation(poses), 1);
+}
+
+// The counter climbs by one for each scan that published nothing.
+TEST(NdtScanMatcherHelper, SkippingPublishNumClimbsOnEachSkippedScan)  // NOLINT
+{
+  int64_t count = 0;
+  count = autoware::ndt_scan_matcher::next_skipping_publish_num(
+    count, /* is_succeed_scan_matching = */ false, true);
+  EXPECT_EQ(count, 1);
+  count = autoware::ndt_scan_matcher::next_skipping_publish_num(count, false, true);
+  EXPECT_EQ(count, 2);
+  count = autoware::ndt_scan_matcher::next_skipping_publish_num(count, false, true);
+  EXPECT_EQ(count, 3);
+}
+
+// A scan that did publish resets it.
+TEST(NdtScanMatcherHelper, SkippingPublishNumResetsOnSuccess)  // NOLINT
+{
+  EXPECT_EQ(
+    autoware::ndt_scan_matcher::next_skipping_publish_num(
+      7, /* is_succeed_scan_matching = */ true, true),
+    0);
+}
+
+// So does being deactivated, so the idle period before activation never raises it. This is the
+// half that a plain "reset on success" would get wrong.
+TEST(NdtScanMatcherHelper, SkippingPublishNumResetsWhileDeactivated)  // NOLINT
+{
+  EXPECT_EQ(
+    autoware::ndt_scan_matcher::next_skipping_publish_num(
+      7, /* is_succeed_scan_matching = */ false, false),
+    0);
+  EXPECT_EQ(
+    autoware::ndt_scan_matcher::next_skipping_publish_num(
+      7, /* is_succeed_scan_matching = */ true, false),
+    0);
+}
+
+// The limit comparison is inclusive: the limit value itself already warns.
+TEST(NdtScanMatcherHelper, SkippingPublishNumLimitIsInclusive)  // NOLINT
+{
+  EXPECT_FALSE(autoware::ndt_scan_matcher::is_skipping_publish_num_over_limit(0, 1));
+  EXPECT_TRUE(autoware::ndt_scan_matcher::is_skipping_publish_num_over_limit(1, 1));
+  EXPECT_TRUE(autoware::ndt_scan_matcher::is_skipping_publish_num_over_limit(2, 1));
 }

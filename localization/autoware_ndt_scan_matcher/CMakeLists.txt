@@ -43,10 +43,17 @@ else()
 endif()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
+  src/initial_pose_intake.cpp
+  src/initial_pose_search.cpp
   src/map_update_module.cpp
   src/ndt_scan_matcher_core.cpp
   src/ndt_scan_matcher_helper.cpp
   src/particle.cpp
+  src/scan_match_alignment.cpp
+  src/scan_match_covariance.cpp
+  src/scan_match_evaluation.cpp
+  src/scan_match_no_ground_score.cpp
+  src/scan_match_pipeline.cpp
 )
 
 link_directories(${PCL_LIBRARY_DIRS})
@@ -115,6 +122,51 @@ if(BUILD_TESTING)
     test/test_ndt_scan_matcher_helper.cpp
   )
   target_link_libraries(test_ndt_scan_matcher_helper ${PROJECT_NAME})
+
+  # Unit tests for the ROS-free scan-match convergence decision. No node, clock, TF or publisher is
+  # involved, so these run in milliseconds where the characterization suite needs a live node.
+  ament_auto_add_gtest(test_scan_match_evaluation
+    test/test_scan_match_evaluation.cpp
+  )
+  target_link_libraries(test_scan_match_evaluation ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the ROS-free alignment step, against a small synthetic map.
+  ament_auto_add_gtest(test_scan_match_alignment
+    test/test_scan_match_alignment.cpp
+  )
+  target_link_libraries(test_scan_match_alignment ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the ROS-free covariance estimation. The MULTI_NDT cases align against a small
+  # synthetic map, so no node or map loader is needed.
+  ament_auto_add_gtest(test_scan_match_covariance
+    test/test_scan_match_covariance.cpp
+  )
+  target_link_libraries(test_scan_match_covariance ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the ROS-free no-ground rescoring, against a small synthetic map.
+  ament_auto_add_gtest(test_scan_match_no_ground_score
+    test/test_scan_match_no_ground_score.cpp
+  )
+  target_link_libraries(test_scan_match_no_ground_score ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the chained scan match. Runs against the same synthetic map, so no node, map
+  # loader or ROS spin is needed.
+  ament_auto_add_gtest(test_scan_match_pipeline
+    test/test_scan_match_pipeline.cpp
+  )
+  target_link_libraries(test_scan_match_pipeline ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the ROS-free initial pose search, against the same synthetic map.
+  ament_auto_add_gtest(test_initial_pose_search
+    test/test_initial_pose_search.cpp
+  )
+  target_link_libraries(test_initial_pose_search ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the ROS-free initial pose intake gates. Pure decisions, so no map or NDT.
+  ament_auto_add_gtest(test_initial_pose_intake
+    test/test_initial_pose_intake.cpp
+  )
+  target_link_libraries(test_initial_pose_intake ${PROJECT_NAME})
 
   # Unit tests for the map update module driven by an injected fake pcd loader (no ROS service).
   ament_auto_add_gtest(test_map_update_module
