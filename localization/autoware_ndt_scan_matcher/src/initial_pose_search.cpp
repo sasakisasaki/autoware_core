@@ -127,4 +127,10 @@ InitialPoseSearchResult search_initial_pose(
   return result;
 }
 
+bool is_reliable_initial_pose(
+  const double best_score, const HyperParameters::ScoreEstimation & param)
+{
+  return param.converged_param_nearest_voxel_transformation_likelihood < best_score;
+}
+
 }  // namespace autoware::ndt_scan_matcher

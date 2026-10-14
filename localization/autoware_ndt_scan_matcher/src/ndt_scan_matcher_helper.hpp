@@ -20,6 +20,7 @@
 #include <geometry_msgs/msg/pose.hpp>
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 namespace autoware::ndt_scan_matcher
@@ -35,6 +36,29 @@ std::array<double, 36> rotate_covariance(
  * sequence of poses. A step is counted as an inversion when the cosine between consecutive motion
  * vectors falls below an internal threshold. */
 int count_oscillation(const std::vector<geometry_msgs::msg::Pose> & result_pose_msg_array);
+
+/**
+ * \brief Advance the count of consecutive scans that published no pose.
+ *
+ * The count exists to notice a localization that has quietly stopped producing poses. It resets
+ * both on a scan that did publish and while the node is deactivated, so the idle period before
+ * activation never raises it.
+ *
+ * \param previous                 the count after the previous scan.
+ * \param is_succeed_scan_matching whether this scan published a pose.
+ * \param is_activated             whether the node is activated.
+ * \return the count after this scan.
+ */
+int64_t next_skipping_publish_num(
+  int64_t previous, bool is_succeed_scan_matching, bool is_activated);
+
+/**
+ * \brief Whether the skip count has reached the limit that warrants a warning.
+ *
+ * The comparison is inclusive, so the limit value itself already warns: a limit of 1 warns on the
+ * first skipped scan, not the second.
+ */
+bool is_skipping_publish_num_over_limit(int64_t skipping_publish_num, int64_t limit);
 
 }  // namespace autoware::ndt_scan_matcher
 

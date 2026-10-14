@@ -79,4 +79,15 @@ int count_oscillation(const std::vector<geometry_msgs::msg::Pose> & result_pose_
   return max_oscillation_cnt;
 }
 
+int64_t next_skipping_publish_num(
+  const int64_t previous, const bool is_succeed_scan_matching, const bool is_activated)
+{
+  return (is_succeed_scan_matching || !is_activated) ? 0 : (previous + 1);
+}
+
+bool is_skipping_publish_num_over_limit(const int64_t skipping_publish_num, const int64_t limit)
+{
+  return skipping_publish_num >= limit;
+}
+
 }  // namespace autoware::ndt_scan_matcher

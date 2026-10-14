@@ -151,4 +151,32 @@ TEST_F(SearchInitialPoseTest, NoParticlesLeavesNoWinner)  // NOLINT
   EXPECT_THROW(search.best(), std::out_of_range);  // NOLINT
 }
 
+// The verdict is a strict comparison against the NVTL threshold: a score exactly at it is not
+// reliable.
+TEST(IsReliableInitialPose, ThresholdComparisonIsStrict)  // NOLINT
+{
+  HyperParameters::ScoreEstimation param{};
+  param.converged_param_nearest_voxel_transformation_likelihood = 2.3;
+
+  EXPECT_FALSE(is_reliable_initial_pose(2.2, param));
+  EXPECT_FALSE(is_reliable_initial_pose(2.3, param)) << "a score exactly at the threshold passed";
+  EXPECT_TRUE(is_reliable_initial_pose(2.4, param));
+}
+
+// The transform-probability threshold has no say, whatever `converged_param_type` selects for the
+// scan path: a search candidate's score is always its NVTL.
+TEST(IsReliableInitialPose, TransformProbabilityThresholdIsIgnored)  // NOLINT
+{
+  HyperParameters::ScoreEstimation param{};
+  param.converged_param_nearest_voxel_transformation_likelihood = 2.3;
+  param.converged_param_transform_probability = 100.0;
+  param.converged_param_type = ConvergedParamType::TRANSFORM_PROBABILITY;
+
+  EXPECT_TRUE(is_reliable_initial_pose(2.4, param))
+    << "the transform probability threshold changed the verdict";
+
+  param.converged_param_transform_probability = 0.0;
+  EXPECT_FALSE(is_reliable_initial_pose(2.2, param));
+}
+
 }  // namespace autoware::ndt_scan_matcher

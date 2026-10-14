@@ -380,12 +380,14 @@ void NDTScanMatcher::callback_sensor_points(
   const bool is_succeed_scan_matching =
     callback_sensor_points_main(sensor_points_msg_in_sensor_frame);
 
-  // check skipping_publish_num
+  // check skipping_publish_num. The counter is deliberately `static`: it is shared by every node
+  // instance in the process, which the characterization suite pins.
   static int64_t skipping_publish_num = 0;
   skipping_publish_num =
-    ((is_succeed_scan_matching || !is_activated_) ? 0 : (skipping_publish_num + 1));
+    next_skipping_publish_num(skipping_publish_num, is_succeed_scan_matching, is_activated_);
   diagnostics_scan_points_->add_key_value("skipping_publish_num", skipping_publish_num);
-  if (skipping_publish_num >= param_.validation.skipping_publish_num) {
+  if (is_skipping_publish_num_over_limit(
+        skipping_publish_num, param_.validation.skipping_publish_num)) {
     std::stringstream message;
     message << "skipping_publish_num exceed limit (" << skipping_publish_num << " times).";
     diagnostics_scan_points_->update_level_and_message(
@@ -948,8 +950,7 @@ void NDTScanMatcher::service_ndt_align_main(
     const auto [pose_with_covariance, score] = align_pose(initial_pose_msg_in_map_frame, *ndt_ptr);
 
     // check reliability of initial pose result
-    res->reliable =
-      (param_.score_estimation.converged_param_nearest_voxel_transformation_likelihood < score);
+    res->reliable = is_reliable_initial_pose(score, param_.score_estimation);
     if (!res->reliable) {
       RCLCPP_WARN_STREAM(
         this->get_logger(), "Initial Pose Estimation is Unstable. Score is " << score);

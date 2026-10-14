@@ -92,6 +92,19 @@ InitialPoseSearchResult search_initial_pose(
   const HyperParameters::InitialPoseEstimation & param,
   const InitialPoseSearchObserver & on_candidate = {});
 
+/**
+ * \brief Whether a search result is good enough for the caller to trust.
+ *
+ * Judged on the nearest-voxel-transformation-likelihood threshold alone, whatever
+ * `param.converged_param_type` selects for the scan path: the score a search candidate carries is
+ * always its NVTL, so the transform-probability threshold has no say here. The comparison is
+ * strict, so a score exactly at the threshold is not reliable.
+ *
+ * \param best_score the winning candidate's score, i.e. `InitialPoseSearchResult::best().score`.
+ * \param param      the score-estimation parameters holding the NVTL threshold.
+ */
+bool is_reliable_initial_pose(double best_score, const HyperParameters::ScoreEstimation & param);
+
 }  // namespace autoware::ndt_scan_matcher
 
 #endif  // INITIAL_POSE_SEARCH_HPP_
