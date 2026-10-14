@@ -190,4 +190,42 @@ TEST_F(AlignScanTest, MatchesManualAlignAndGetResult)  // NOLINT
     expected.nearest_voxel_transformation_likelihood);
 }
 
+// `align_once` is the primitive the align service uses mid-search, so it must not disturb the
+// regularization pose the scan path left on the NDT.
+TEST_F(AlignScanTest, AlignOnceLeavesTheRegularizationPoseAlone)  // NOLINT
+{
+  auto ndt_params = test::make_test_ndt_params();
+  ndt_params.regularization_scale_factor = 1.0F;
+  ndt_.setParams(ndt_params);
+  test::set_target_map(ndt_, map_);
+
+  const pclomp::NdtResult unregularized = align_once(ndt_, map_, Eigen::Matrix4f::Identity());
+
+  apply_regularization_pose(ndt_, translation(1.0F, 0.0F));
+  const pclomp::NdtResult first = align_once(ndt_, map_, Eigen::Matrix4f::Identity());
+  const pclomp::NdtResult second = align_once(ndt_, map_, Eigen::Matrix4f::Identity());
+
+  ASSERT_FALSE(first.hessian.isApprox(unregularized.hessian))
+    << "the regularization pose never reached the alignment";
+  EXPECT_EQ(second.hessian, first.hessian) << "align_once cleared the regularization pose";
+}
+
+// Going through `align_scan` with no pose does clear it, which is what the scan path wants.
+TEST_F(AlignScanTest, AlignScanStillClearsTheRegularizationPose)  // NOLINT
+{
+  auto ndt_params = test::make_test_ndt_params();
+  ndt_params.regularization_scale_factor = 1.0F;
+  ndt_.setParams(ndt_params);
+  test::set_target_map(ndt_, map_);
+
+  const pclomp::NdtResult unregularized = align_once(ndt_, map_, Eigen::Matrix4f::Identity());
+
+  apply_regularization_pose(ndt_, translation(1.0F, 0.0F));
+  const std::optional<pclomp::NdtResult> cleared =
+    align_scan(ndt_, map_, Eigen::Matrix4f::Identity(), std::nullopt);
+
+  ASSERT_TRUE(cleared.has_value());
+  EXPECT_EQ(cleared->hessian, unregularized.hessian);
+}
+
 }  // namespace autoware::ndt_scan_matcher

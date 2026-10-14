@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "ndt_scan_matcher_helper.hpp"
+#include "scan_match_alignment.hpp"
 #include "scan_match_no_ground_score.hpp"
 #include "scan_match_pipeline.hpp"
 
@@ -991,7 +992,6 @@ std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> NDTScanMatcher
     param_.initial_pose_estimation.n_startup_trials, sample_mean, sample_stddev);
 
   std::vector<Particle> particle_array;
-  auto output_cloud = std::make_shared<pcl::PointCloud<PointSource>>();
 
   // publish the estimated poses in 20 times to see the progress and to avoid dropping data
   visualization_msgs::msg::MarkerArray marker_array;
@@ -1015,8 +1015,8 @@ std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> NDTScanMatcher
     initial_pose.orientation = tf2::toMsg(tf_quaternion);
 
     const Eigen::Matrix4f initial_pose_matrix = pose_to_matrix4f(initial_pose);
-    ndt_ref.align(*output_cloud, initial_pose_matrix, sensor_points_in_baselink_frame_);
-    const pclomp::NdtResult ndt_result = ndt_ref.getResult();
+    const pclomp::NdtResult ndt_result =
+      align_once(ndt_ref, sensor_points_in_baselink_frame_, initial_pose_matrix);
 
     Particle particle(
       initial_pose, matrix4f_to_pose(ndt_result.pose),

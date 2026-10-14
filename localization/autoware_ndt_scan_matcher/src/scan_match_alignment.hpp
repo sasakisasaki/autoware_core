@@ -41,6 +41,26 @@ void apply_regularization_pose(
   const std::optional<Eigen::Matrix4f> & regularization_pose);
 
 /**
+ * \brief Align one scan from \p initial_pose and collect the result.
+ *
+ * The alignment primitive both callers share. It touches nothing on the NDT but the alignment
+ * itself -- in particular it leaves the regularization pose exactly as it found it, which is why
+ * the align service can use it during its pose search without disturbing what the scan path set.
+ *
+ * \pre The NDT must have a target map; aligning without one is meaningless. The scan path gates
+ *      this through `align_scan`, and the align service checks `hasTarget()` under the same lock
+ *      before it starts searching.
+ *
+ * \param ndt          the NDT to align against; must hold the lock the node guards it with.
+ * \param source       the sensor points in the base_link frame.
+ * \param initial_pose the pose to start the search from, as a 4x4 homogeneous transform.
+ */
+pclomp::NdtResult align_once(
+  pclomp::MultiGridNormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> & ndt,
+  const pcl::shared_ptr<const pcl::PointCloud<pcl::PointXYZ>> & source,
+  const Eigen::Matrix4f & initial_pose);
+
+/**
  * \brief Align one scan against the NDT's target map.
  *
  * Applies \p regularization_pose, refuses to run without a target map, then aligns and collects the
