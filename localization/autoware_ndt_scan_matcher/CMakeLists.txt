@@ -51,6 +51,7 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/scan_match_covariance.cpp
   src/scan_match_evaluation.cpp
   src/scan_match_no_ground_score.cpp
+  src/scan_match_pipeline.cpp
 )
 
 link_directories(${PCL_LIBRARY_DIRS})
@@ -145,6 +146,13 @@ if(BUILD_TESTING)
     test/test_scan_match_no_ground_score.cpp
   )
   target_link_libraries(test_scan_match_no_ground_score ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the chained scan match. Runs against the same synthetic map, so no node, map
+  # loader or ROS spin is needed.
+  ament_auto_add_gtest(test_scan_match_pipeline
+    test/test_scan_match_pipeline.cpp
+  )
+  target_link_libraries(test_scan_match_pipeline ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
 
   # Unit tests for the map update module driven by an injected fake pcd loader (no ROS service).
   ament_auto_add_gtest(test_map_update_module

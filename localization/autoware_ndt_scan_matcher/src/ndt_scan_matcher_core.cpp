@@ -13,10 +13,8 @@
 // limitations under the License.
 
 #include "ndt_scan_matcher_helper.hpp"
-#include "scan_match_alignment.hpp"
-#include "scan_match_covariance.hpp"
-#include "scan_match_evaluation.hpp"
 #include "scan_match_no_ground_score.hpp"
+#include "scan_match_pipeline.hpp"
 
 #include <autoware/localization_util/matrix_type.hpp>
 #include <autoware/localization_util/tree_structured_parzen_estimator.hpp>
@@ -536,58 +534,34 @@ bool NDTScanMatcher::callback_sensor_points_main(
       RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, msg.str());
     }
 
-    // perform ndt scan matching
+    // perform ndt scan matching: align, judge the result, estimate its covariance
     const Eigen::Matrix4f initial_pose_matrix =
       pose_to_matrix4f(interpolation_result.interpolated_pose.pose.pose);
-    const std::optional<pclomp::NdtResult> ndt_result_opt = align_scan(
-      *ndt_ptr, sensor_points_in_baselink_frame_, initial_pose_matrix, regularization_pose);
-
-    // check is_set_map_points
-    const bool is_set_map_points = ndt_result_opt.has_value();
-    diagnostics_scan_points_->add_key_value("is_set_map_points", is_set_map_points);
-    if (!is_set_map_points) {
-      std::stringstream message;
-      message << "Map points is not set.";
-      diagnostics_scan_points_->update_level_and_message(
-        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    DiagnosticsReport scan_match_report;
+    const ScanMatchOutput scan_match = match_scan(
+      *ndt_ptr, sensor_points_in_baselink_frame_, initial_pose_matrix, regularization_pose,
+      param_.score_estimation, param_.covariance, scan_match_report);
+    apply_diagnostics_update(*diagnostics_scan_points_, scan_match_report);
+    if (scan_match.status != ScanMatchOutput::Status::kSucceeded) {
       return false;
     }
 
-    const pclomp::NdtResult & ndt_result = ndt_result_opt.value();
+    const pclomp::NdtResult & ndt_result = scan_match.ndt_result.value();
+    const geometry_msgs::msg::Pose & result_pose_msg = scan_match.result_pose;
+    const std::vector<geometry_msgs::msg::Pose> & transformation_msg_array =
+      scan_match.transformation_array;
+    const ScanMatchEvaluation & evaluation = scan_match.evaluation.value();
 
-    const geometry_msgs::msg::Pose result_pose_msg = matrix4f_to_pose(ndt_result.pose);
-    std::vector<geometry_msgs::msg::Pose> transformation_msg_array;
-    for (const auto & pose_matrix : ndt_result.transformation_array) {
-      geometry_msgs::msg::Pose pose_ros = matrix4f_to_pose(pose_matrix);
-      transformation_msg_array.push_back(pose_ros);
-    }
-
-    DiagnosticsReport evaluation_report;
-    const std::optional<ScanMatchEvaluation> evaluation = evaluate_scan_match_result(
-      ndt_result, ndt_ptr->getMaximumIterations(), transformation_msg_array,
-      param_.score_estimation, evaluation_report);
-    apply_diagnostics_update(*diagnostics_scan_points_, evaluation_report);
-    if (!evaluation.has_value()) {
-      return false;
-    }
-
-    if (!evaluation->is_ok_score) {
+    if (!evaluation.is_ok_score) {
       std::stringstream message;
-      message << "Score is below the threshold. Score: " << evaluation->score
-              << ", Threshold: " << evaluation->score_threshold;
+      message << "Score is below the threshold. Score: " << evaluation.score
+              << ", Threshold: " << evaluation.score_threshold;
       RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
     }
-    const bool is_converged = evaluation->is_converged;
+    const bool is_converged = evaluation.is_converged;
 
-    // covariance estimation
-    const Eigen::Quaterniond map_to_base_link_quat = Eigen::Quaterniond(
-      result_pose_msg.orientation.w, result_pose_msg.orientation.x, result_pose_msg.orientation.y,
-      result_pose_msg.orientation.z);
-    const ScanMatchCovariance covariance_result = estimate_scan_match_covariance(
-      ndt_result, initial_pose_matrix, map_to_base_link_quat, param_.covariance, *ndt_ptr,
-      sensor_points_in_baselink_frame_);
-    publish_multi_poses(sensor_ros_time, covariance_result);
-    const std::array<double, 36> & ndt_covariance = covariance_result.covariance;
+    publish_multi_poses(sensor_ros_time, scan_match.covariance.value());
+    const std::array<double, 36> & ndt_covariance = scan_match.covariance->covariance;
 
     // check distance_initial_to_result
     const auto distance_initial_to_result = static_cast<double>(autoware::localization_util::norm(
