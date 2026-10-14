@@ -43,6 +43,7 @@ else()
 endif()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
+  src/initial_pose_intake.cpp
   src/initial_pose_search.cpp
   src/map_update_module.cpp
   src/ndt_scan_matcher_core.cpp
@@ -160,6 +161,12 @@ if(BUILD_TESTING)
     test/test_initial_pose_search.cpp
   )
   target_link_libraries(test_initial_pose_search ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the ROS-free initial pose intake gates. Pure decisions, so no map or NDT.
+  ament_auto_add_gtest(test_initial_pose_intake
+    test/test_initial_pose_intake.cpp
+  )
+  target_link_libraries(test_initial_pose_intake ${PROJECT_NAME})
 
   # Unit tests for the map update module driven by an injected fake pcd loader (no ROS service).
   ament_auto_add_gtest(test_map_update_module
