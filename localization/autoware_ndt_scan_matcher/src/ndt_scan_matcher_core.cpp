@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "initial_pose_intake.hpp"
 #include "initial_pose_search.hpp"
 #include "ndt_scan_matcher_helper.hpp"
 #include "scan_match_no_ground_score.hpp"
@@ -320,31 +321,13 @@ void NDTScanMatcher::callback_initial_pose_main(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
   initial_pose_msg_ptr)
 {
-  diagnostics_initial_pose_->add_key_value(
-    "topic_time_stamp",
-    static_cast<rclcpp::Time>(initial_pose_msg_ptr->header.stamp).nanoseconds());
-
-  // check is_activated
-  diagnostics_initial_pose_->add_key_value("is_activated", static_cast<bool>(is_activated_));
-  if (!is_activated_) {
-    std::stringstream message;
-    message << "Node is not activated.";
-    diagnostics_initial_pose_->update_level_and_message(
-      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
-    return;
-  }
-
-  // check is_expected_frame_id
-  const bool is_expected_frame_id =
-    (initial_pose_msg_ptr->header.frame_id == param_.frame.map_frame);
-  diagnostics_initial_pose_->add_key_value("is_expected_frame_id", is_expected_frame_id);
-  if (!is_expected_frame_id) {
-    std::stringstream message;
-    message << "Received initial pose message with frame_id "
-            << initial_pose_msg_ptr->header.frame_id << ", but expected " << param_.frame.map_frame
-            << ". Please check the frame_id in the input topic and ensure it is correct.";
-    diagnostics_initial_pose_->update_level_and_message(
-      diagnostic_msgs::msg::DiagnosticStatus::ERROR, message.str());
+  DiagnosticsReport intake_report;
+  const InitialPoseIntake intake = check_initial_pose(
+    static_cast<rclcpp::Time>(initial_pose_msg_ptr->header.stamp).nanoseconds(),
+    initial_pose_msg_ptr->header.frame_id, param_.frame.map_frame, static_cast<bool>(is_activated_),
+    intake_report);
+  apply_diagnostics_update(*diagnostics_initial_pose_, intake_report);
+  if (!intake.is_accepted()) {
     return;
   }
 
