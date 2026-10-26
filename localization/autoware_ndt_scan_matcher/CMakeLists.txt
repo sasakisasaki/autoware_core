@@ -42,12 +42,13 @@ else()
   message(WARNING "OpenMP not found")
 endif()
 
-ament_auto_add_library(${PROJECT_NAME} SHARED
-  src/hyper_parameters_loader.cpp
+link_directories(${PCL_LIBRARY_DIRS})
+
+# The core layer: the decision logic, with no dependency on rclcpp.
+ament_auto_add_library(${PROJECT_NAME}_core SHARED
   src/initial_pose_intake.cpp
   src/initial_pose_search.cpp
   src/map_update_module.cpp
-  src/ndt_scan_matcher_core.cpp
   src/ndt_scan_matcher_helper.cpp
   src/particle.cpp
   src/scan_match_alignment.cpp
@@ -57,8 +58,16 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/scan_match_pipeline.cpp
 )
 
-link_directories(${PCL_LIBRARY_DIRS})
-target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARIES} multigrid_ndt_omp)
+target_link_libraries(${PROJECT_NAME}_core ${PCL_LIBRARIES} multigrid_ndt_omp)
+
+# The ROS layer. Keeps the ${PROJECT_NAME} name so that the plugin string, the executable name and
+# every existing target_link_libraries stay as they are.
+ament_auto_add_library(${PROJECT_NAME} SHARED
+  src/hyper_parameters_loader.cpp
+  src/ndt_scan_matcher_core.cpp
+)
+
+target_link_libraries(${PROJECT_NAME} ${PROJECT_NAME}_core ${PCL_LIBRARIES} multigrid_ndt_omp)
 
 autoware_agnocast_wrapper_register_node(${PROJECT_NAME}
   PLUGIN "autoware::ndt_scan_matcher::NDTScanMatcher"
@@ -122,58 +131,77 @@ if(BUILD_TESTING)
   ament_auto_add_gtest(test_ndt_scan_matcher_helper
     test/test_ndt_scan_matcher_helper.cpp
   )
-  target_link_libraries(test_ndt_scan_matcher_helper ${PROJECT_NAME})
+  target_link_libraries(test_ndt_scan_matcher_helper ${PROJECT_NAME}_core)
 
   # Unit tests for the ROS-free scan-match convergence decision. No node, clock, TF or publisher is
   # involved, so these run in milliseconds where the characterization suite needs a live node.
   ament_auto_add_gtest(test_scan_match_evaluation
     test/test_scan_match_evaluation.cpp
   )
-  target_link_libraries(test_scan_match_evaluation ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+  target_link_libraries(test_scan_match_evaluation ${PROJECT_NAME}_core multigrid_ndt_omp ${PCL_LIBRARIES})
 
   # Unit tests for the ROS-free alignment step, against a small synthetic map.
   ament_auto_add_gtest(test_scan_match_alignment
     test/test_scan_match_alignment.cpp
   )
-  target_link_libraries(test_scan_match_alignment ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+  target_link_libraries(test_scan_match_alignment ${PROJECT_NAME}_core multigrid_ndt_omp ${PCL_LIBRARIES})
 
   # Unit tests for the ROS-free covariance estimation. The MULTI_NDT cases align against a small
   # synthetic map, so no node or map loader is needed.
   ament_auto_add_gtest(test_scan_match_covariance
     test/test_scan_match_covariance.cpp
   )
-  target_link_libraries(test_scan_match_covariance ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+  target_link_libraries(test_scan_match_covariance ${PROJECT_NAME}_core multigrid_ndt_omp ${PCL_LIBRARIES})
 
   # Unit tests for the ROS-free no-ground rescoring, against a small synthetic map.
   ament_auto_add_gtest(test_scan_match_no_ground_score
     test/test_scan_match_no_ground_score.cpp
   )
-  target_link_libraries(test_scan_match_no_ground_score ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+  target_link_libraries(test_scan_match_no_ground_score ${PROJECT_NAME}_core multigrid_ndt_omp ${PCL_LIBRARIES})
 
   # Unit tests for the chained scan match. Runs against the same synthetic map, so no node, map
   # loader or ROS spin is needed.
   ament_auto_add_gtest(test_scan_match_pipeline
     test/test_scan_match_pipeline.cpp
   )
-  target_link_libraries(test_scan_match_pipeline ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+  target_link_libraries(test_scan_match_pipeline ${PROJECT_NAME}_core multigrid_ndt_omp ${PCL_LIBRARIES})
 
   # Unit tests for the ROS-free initial pose search, against the same synthetic map.
   ament_auto_add_gtest(test_initial_pose_search
     test/test_initial_pose_search.cpp
   )
-  target_link_libraries(test_initial_pose_search ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+  target_link_libraries(test_initial_pose_search ${PROJECT_NAME}_core multigrid_ndt_omp ${PCL_LIBRARIES})
 
   # Unit tests for the ROS-free initial pose intake gates. Pure decisions, so no map or NDT.
   ament_auto_add_gtest(test_initial_pose_intake
     test/test_initial_pose_intake.cpp
   )
-  target_link_libraries(test_initial_pose_intake ${PROJECT_NAME})
+  target_link_libraries(test_initial_pose_intake ${PROJECT_NAME}_core)
 
   # Unit tests for the map update module driven by an injected fake pcd loader (no ROS service).
   ament_auto_add_gtest(test_map_update_module
     test/test_map_update_module.cpp
   )
-  target_link_libraries(test_map_update_module ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+  target_link_libraries(test_map_update_module ${PROJECT_NAME}_core multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Compiling this is the test: the core's headers, with rclcpp off the include path. See the file
+  # for what it covers. An OBJECT library because there is nothing to run -- success is the compile.
+  add_library(test_ros_independence OBJECT test/test_ros_independence.cpp)
+  target_include_directories(test_ros_independence PRIVATE include src)
+  # SYSTEM so that PCL's own headers are not held to this package's -Wpedantic: PCL 1.12 uses
+  # anonymous structs, which -Wpedantic rejects and autoware_package() only waives for Clang.
+  target_include_directories(test_ros_independence SYSTEM PRIVATE ${PCL_INCLUDE_DIRS})
+  # Eigen and the message interface targets only. The message targets bring rosidl, not rclcpp;
+  # adding a target that pulls rclcpp in would silently defeat this test.
+  target_link_libraries(test_ros_independence PRIVATE
+    Eigen3::Eigen
+    ${autoware_map_msgs_TARGETS}
+    ${builtin_interfaces_TARGETS}
+    ${geometry_msgs_TARGETS}
+    ${sensor_msgs_TARGETS}
+    ${std_msgs_TARGETS}
+    ${visualization_msgs_TARGETS}
+  )
 endif()
 
 autoware_ament_auto_package(

@@ -34,7 +34,10 @@ void push_debug_markers(
   marker.scale.y = 0.1;
   marker.scale.z = 0.1;
   marker.id = static_cast<int32_t>(i);
-  marker.lifetime = rclcpp::Duration::from_seconds(10.0);  // 10.0 is the lifetime in seconds.
+  // Set as a plain Duration message rather than through the client library's Duration helper, so
+  // that the core layer needs no client library to say "ten seconds".
+  marker.lifetime.sec = 10;
+  marker.lifetime.nanosec = 0;
 
   marker.ns = "initial_pose_transform_probability_color_marker";
   marker.pose = particle.initial_pose;
