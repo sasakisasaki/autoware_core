@@ -43,6 +43,7 @@ else()
 endif()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
+  src/hyper_parameters_loader.cpp
   src/initial_pose_intake.cpp
   src/initial_pose_search.cpp
   src/map_update_module.cpp
