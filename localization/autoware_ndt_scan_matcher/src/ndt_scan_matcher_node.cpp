@@ -21,7 +21,7 @@
 #include <autoware/localization_util/matrix_type.hpp>
 #include <autoware/localization_util/tree_structured_parzen_estimator.hpp>
 #include <autoware/localization_util/util_func.hpp>
-#include <autoware/ndt_scan_matcher/ndt_scan_matcher_core.hpp>
+#include <autoware/ndt_scan_matcher/ndt_scan_matcher_node.hpp>
 #include <autoware/ndt_scan_matcher/particle.hpp>
 #include <autoware_utils_geometry/geometry.hpp>
 #include <autoware_utils_pcl/transforms.hpp>
@@ -75,7 +75,7 @@ autoware_internal_debug_msgs::msg::Int32Stamped make_int32_stamped(
   return autoware_internal_debug_msgs::build<T>().stamp(stamp).data(data);
 }
 
-NDTScanMatcher::NDTScanMatcher(const rclcpp::NodeOptions & options)
+NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
 : autoware::agnocast_wrapper::Node("ndt_scan_matcher", options),
   tf2_broadcaster_(*this),
   tf2_buffer_(this->get_clock()),
@@ -98,15 +98,15 @@ NDTScanMatcher::NDTScanMatcher(const rclcpp::NodeOptions & options)
   constexpr auto period_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
     std::chrono::duration<double>(map_update_dt));
   map_update_timer_ = autoware::agnocast_wrapper::create_timer(
-    this, this->get_clock(), period_ns, std::bind(&NDTScanMatcher::callback_timer, this),
+    this, this->get_clock(), period_ns, std::bind(&NdtScanMatcherNode::callback_timer, this),
     timer_callback_group_);
   initial_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "ekf_pose_with_covariance", 10,
-    std::bind(&NDTScanMatcher::callback_initial_pose, this, std::placeholders::_1),
+    std::bind(&NdtScanMatcherNode::callback_initial_pose, this, std::placeholders::_1),
     initial_pose_sub_opt);
   sensor_points_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
     "points_raw", rclcpp::SensorDataQoS().keep_last(1),
-    std::bind(&NDTScanMatcher::callback_sensor_points, this, std::placeholders::_1),
+    std::bind(&NdtScanMatcherNode::callback_sensor_points, this, std::placeholders::_1),
     sensor_sub_opt);
 
   // Only if regularization is enabled, subscribe to the regularization base pose
@@ -119,7 +119,7 @@ NDTScanMatcher::NDTScanMatcher(const rclcpp::NodeOptions & options)
     regularization_pose_sub_ =
       this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "regularization_pose_with_covariance", 10,
-        std::bind(&NDTScanMatcher::callback_regularization_pose, this, std::placeholders::_1),
+        std::bind(&NdtScanMatcherNode::callback_regularization_pose, this, std::placeholders::_1),
         initial_pose_sub_opt);
     const double value_as_unlimited = 1000.0;
     regularization_pose_buffer_ =
@@ -182,12 +182,13 @@ NDTScanMatcher::NDTScanMatcher(const rclcpp::NodeOptions & options)
     this->create_service<autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped>(
       "ndt_align_srv",
       std::bind(
-        &NDTScanMatcher::service_ndt_align, this, std::placeholders::_1, std::placeholders::_2),
+        &NdtScanMatcherNode::service_ndt_align, this, std::placeholders::_1, std::placeholders::_2),
       service_qos, sensor_callback_group);
   service_trigger_node_ = this->create_service<std_srvs::srv::SetBool>(
     "trigger_node_srv",
     std::bind(
-      &NDTScanMatcher::service_trigger_node, this, std::placeholders::_1, std::placeholders::_2),
+      &NdtScanMatcherNode::service_trigger_node, this, std::placeholders::_1,
+      std::placeholders::_2),
     service_qos, sensor_callback_group);
 
   ndt_ptr_.with([&](const auto & ndt_ptr) { ndt_ptr->setParams(param_.ndt); });
@@ -221,7 +222,7 @@ NDTScanMatcher::NDTScanMatcher(const rclcpp::NodeOptions & options)
 }
 
 MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr
-NDTScanMatcher::get_differential_point_cloud_map(
+NdtScanMatcherNode::get_differential_point_cloud_map(
   const MapUpdateModule::GetDifferentialPointCloudMap::Request::SharedPtr & request)
 {
   if (
@@ -247,7 +248,7 @@ NDTScanMatcher::get_differential_point_cloud_map(
   return result.get();
 }
 
-void NDTScanMatcher::apply_diagnostics_update(
+void NdtScanMatcherNode::apply_diagnostics_update(
   DiagnosticsInterface & diagnostics, const DiagnosticsReport & report)
 {
   for (const auto & key_value : report.key_values) {
@@ -258,7 +259,7 @@ void NDTScanMatcher::apply_diagnostics_update(
   diagnostics.update_level_and_message(static_cast<int8_t>(report.level), report.message);
 }
 
-void NDTScanMatcher::publish_loaded_map_if_present(
+void NdtScanMatcherNode::publish_loaded_map_if_present(
   MapUpdateModule::UpdateResult & result, const rclcpp::Time & stamp) const
 {
   if (!result.loaded_pcd_map.has_value()) {
@@ -268,7 +269,7 @@ void NDTScanMatcher::publish_loaded_map_if_present(
   loaded_pcd_pub_->publish(*result.loaded_pcd_map);
 }
 
-void NDTScanMatcher::callback_timer()
+void NdtScanMatcherNode::callback_timer()
 {
   const rclcpp::Time ros_time_now = this->now();
 
@@ -306,7 +307,7 @@ void NDTScanMatcher::callback_timer()
   diagnostics_map_update_->publish(ros_time_now);
 }
 
-void NDTScanMatcher::callback_initial_pose(
+void NdtScanMatcherNode::callback_initial_pose(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
   initial_pose_msg_ptr)
 {
@@ -317,7 +318,7 @@ void NDTScanMatcher::callback_initial_pose(
   diagnostics_initial_pose_->publish(initial_pose_msg_ptr->header.stamp);
 }
 
-void NDTScanMatcher::callback_initial_pose_main(
+void NdtScanMatcherNode::callback_initial_pose_main(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
   initial_pose_msg_ptr)
 {
@@ -337,7 +338,7 @@ void NDTScanMatcher::callback_initial_pose_main(
   latest_ekf_position_.with([&](auto & pos) { pos = initial_pose_msg_ptr->pose.pose.position; });
 }
 
-void NDTScanMatcher::callback_regularization_pose(
+void NdtScanMatcherNode::callback_regularization_pose(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
   pose_conv_msg_ptr)
 {
@@ -352,7 +353,7 @@ void NDTScanMatcher::callback_regularization_pose(
   diagnostics_regularization_pose_->publish(pose_conv_msg_ptr->header.stamp);
 }
 
-void NDTScanMatcher::callback_sensor_points(
+void NdtScanMatcherNode::callback_sensor_points(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
   sensor_points_msg_in_sensor_frame)
 {
@@ -380,7 +381,7 @@ void NDTScanMatcher::callback_sensor_points(
   diagnostics_scan_points_->publish(sensor_points_msg_in_sensor_frame->header.stamp);
 }
 
-bool NDTScanMatcher::callback_sensor_points_main(
+bool NdtScanMatcherNode::callback_sensor_points_main(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
   sensor_points_msg_in_sensor_frame)
 {
@@ -633,7 +634,7 @@ bool NDTScanMatcher::callback_sensor_points_main(
   });
 }
 
-void NDTScanMatcher::transform_sensor_measurement(
+void NdtScanMatcherNode::transform_sensor_measurement(
   const std::string & source_frame, const std::string & target_frame,
   const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_input_ptr,
   pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_output_ptr)
@@ -658,7 +659,7 @@ void NDTScanMatcher::transform_sensor_measurement(
     *sensor_points_input_ptr, *sensor_points_output_ptr, base_to_sensor_matrix);
 }
 
-void NDTScanMatcher::publish_tf(
+void NdtScanMatcherNode::publish_tf(
   const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg)
 {
   geometry_msgs::msg::PoseStamped result_pose_stamped_msg;
@@ -669,7 +670,7 @@ void NDTScanMatcher::publish_tf(
     autoware_utils_geometry::pose2transform(result_pose_stamped_msg, param_.frame.ndt_base_frame));
 }
 
-void NDTScanMatcher::publish_pose(
+void NdtScanMatcherNode::publish_pose(
   const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
   const std::array<double, 36> & ndt_covariance, const bool is_converged)
 {
@@ -690,7 +691,7 @@ void NDTScanMatcher::publish_pose(
   }
 }
 
-void NDTScanMatcher::publish_point_cloud(
+void NdtScanMatcherNode::publish_point_cloud(
   const rclcpp::Time & sensor_ros_time, const std::string & frame_id,
   const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr)
 {
@@ -701,7 +702,7 @@ void NDTScanMatcher::publish_point_cloud(
   sensor_aligned_pose_pub_->publish(std::move(sensor_points_msg_in_map));
 }
 
-void NDTScanMatcher::publish_marker(
+void NdtScanMatcherNode::publish_marker(
   const rclcpp::Time & sensor_ros_time, const std::vector<geometry_msgs::msg::Pose> & pose_array,
   NormalDistributionsTransform & ndt_ref)
 {
@@ -732,7 +733,7 @@ void NDTScanMatcher::publish_marker(
   ndt_marker_pub_->publish(std::move(marker_array));
 }
 
-void NDTScanMatcher::publish_initial_to_result(
+void NdtScanMatcherNode::publish_initial_to_result(
   const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
   const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
   const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_old_msg,
@@ -762,7 +763,7 @@ void NDTScanMatcher::publish_initial_to_result(
     make_float32_stamped(sensor_ros_time, initial_to_result_distance_new));
 }
 
-void NDTScanMatcher::publish_multi_poses(
+void NdtScanMatcherNode::publish_multi_poses(
   const rclcpp::Time & sensor_ros_time, const ScanMatchCovariance & covariance_result)
 {
   const auto to_pose_array = [&](const std::vector<Eigen::Matrix4f> & poses) {
@@ -782,7 +783,7 @@ void NDTScanMatcher::publish_multi_poses(
   }
 }
 
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr NDTScanMatcher::visualize_point_score(
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr NdtScanMatcherNode::visualize_point_score(
   const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr,
   const float & lower_nvs, const float & upper_nvs, NormalDistributionsTransform & ndt_ref)
 {
@@ -807,7 +808,7 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr NDTScanMatcher::visualize_point_score(
   return nvs_points_in_map_ptr_rgb;
 }
 
-std::optional<Eigen::Matrix4f> NDTScanMatcher::interpolate_regularization_pose(
+std::optional<Eigen::Matrix4f> NdtScanMatcherNode::interpolate_regularization_pose(
   const rclcpp::Time & sensor_ros_time)
 {
   std::optional<SmartPoseBuffer::InterpolateResult> interpolation_result_opt =
@@ -821,7 +822,7 @@ std::optional<Eigen::Matrix4f> NDTScanMatcher::interpolate_regularization_pose(
   return pose_to_matrix4f(interpolation_result.interpolated_pose.pose.pose);
 }
 
-void NDTScanMatcher::service_trigger_node(
+void NdtScanMatcherNode::service_trigger_node(
   const std_srvs::srv::SetBool::Request::SharedPtr req,
   std_srvs::srv::SetBool::Response::SharedPtr res)
 {
@@ -841,7 +842,7 @@ void NDTScanMatcher::service_trigger_node(
   diagnostics_trigger_node_->publish(ros_time_now);
 }
 
-void NDTScanMatcher::service_ndt_align(
+void NdtScanMatcherNode::service_ndt_align(
   const autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped::Request::SharedPtr req,
   autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped::Response::SharedPtr res)
 {
@@ -866,7 +867,7 @@ void NDTScanMatcher::service_ndt_align(
   diagnostics_ndt_align_->publish(ros_time_now);
 }
 
-void NDTScanMatcher::service_ndt_align_main(
+void NdtScanMatcherNode::service_ndt_align_main(
   const autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped::Request::SharedPtr req,
   autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped::Response::SharedPtr res)
 {
@@ -945,7 +946,7 @@ void NDTScanMatcher::service_ndt_align_main(
   });
 }
 
-std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> NDTScanMatcher::align_pose(
+std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> NdtScanMatcherNode::align_pose(
   const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_with_cov,
   NormalDistributionsTransform & ndt_ref)
 {
@@ -995,4 +996,4 @@ std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> NDTScanMatcher
 }  // namespace autoware::ndt_scan_matcher
 
 #include <rclcpp_components/register_node_macro.hpp>
-RCLCPP_COMPONENTS_REGISTER_NODE(autoware::ndt_scan_matcher::NDTScanMatcher)
+RCLCPP_COMPONENTS_REGISTER_NODE(autoware::ndt_scan_matcher::NdtScanMatcherNode)

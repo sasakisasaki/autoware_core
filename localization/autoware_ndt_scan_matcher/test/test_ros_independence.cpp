@@ -23,9 +23,8 @@
 // client library. There is nothing to run, so this target is an OBJECT library rather than a test
 // executable; success is the compile.
 //
-// Note that `ndt_scan_matcher_core.{hpp,cpp}` is NOT part of what this covers, despite its name:
-// that pair is the ROS node, and its `_core` is the older "main implementation file" convention
-// rather than this package's core layer.
+// The ROS layer it is checked against is `ndt_scan_matcher_node.{hpp,cpp}` plus
+// `hyper_parameters_loader.{hpp,cpp}`, which are deliberately absent below.
 //
 // Add every core header here as it appears. A header left out is not covered.
 
