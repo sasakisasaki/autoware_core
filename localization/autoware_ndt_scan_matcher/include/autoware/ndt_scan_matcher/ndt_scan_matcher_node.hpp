@@ -107,9 +107,12 @@ private:
   void callback_sensor_points(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
     sensor_points_msg_in_sensor_frame);
+  // Records what it would have logged into `scan_logs` rather than logging, so that the caller
+  // replays from one place regardless of which gate returned.
   bool callback_sensor_points_main(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
-    sensor_points_msg_in_sensor_frame);
+      sensor_points_msg_in_sensor_frame,
+    std::vector<LogRequest> & scan_logs);
 
   void service_trigger_node(
     const std_srvs::srv::SetBool::Request::SharedPtr req,
@@ -249,6 +252,9 @@ private:
   MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr
   get_differential_point_cloud_map(
     const MapUpdateModule::GetDifferentialPointCloudMap::Request::SharedPtr & request);
+
+  // Emits records collected by a ROS-free module, each at the severity and throttle it had.
+  void replay_logs(const std::vector<LogRequest> & logs);
 
   // Forwards a diagnostics update produced by a ROS-free module to the given DiagnosticsInterface.
   static void apply_diagnostics_update(

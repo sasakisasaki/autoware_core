@@ -248,6 +248,26 @@ NdtScanMatcherNode::get_differential_point_cloud_map(
   return result.get();
 }
 
+void NdtScanMatcherNode::replay_logs(const std::vector<LogRequest> & logs)
+{
+  // One `case` per site, so that each keeps the severity it had and its own macro expansion --
+  // and therefore its own throttle clock. Sharing one macro would let either site silence the
+  // other for the rest of the window.
+  for (const auto & log : logs) {
+    switch (log.site) {
+      case LogSite::ScanTransformFailed:
+        RCLCPP_ERROR_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, log.message);
+        break;
+      case LogSite::ScanOutOfMapRange:
+        RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, log.message);
+        break;
+      case LogSite::ScanScoreBelowThreshold:
+        RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, log.message);
+        break;
+    }
+  }
+}
+
 void NdtScanMatcherNode::apply_diagnostics_update(
   DiagnosticsInterface & diagnostics, const DiagnosticsReport & report)
 {
@@ -360,9 +380,12 @@ void NdtScanMatcherNode::callback_sensor_points(
   // clear diagnostics
   diagnostics_scan_points_->clear();
 
-  // scan matching
+  // scan matching. The log records come back rather than being emitted where they are produced,
+  // so that they are replayed from one place no matter which gate returned.
+  std::vector<LogRequest> scan_logs;
   const bool is_succeed_scan_matching =
-    callback_sensor_points_main(sensor_points_msg_in_sensor_frame);
+    callback_sensor_points_main(sensor_points_msg_in_sensor_frame, scan_logs);
+  replay_logs(scan_logs);
 
   // check skipping_publish_num. The counter is deliberately `static`: it is shared by every node
   // instance in the process, which the characterization suite pins.
@@ -383,7 +406,8 @@ void NdtScanMatcherNode::callback_sensor_points(
 
 bool NdtScanMatcherNode::callback_sensor_points_main(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
-  sensor_points_msg_in_sensor_frame)
+    sensor_points_msg_in_sensor_frame,
+  std::vector<LogRequest> & scan_logs)
 {
   const auto exe_start_time = std::chrono::system_clock::now();
 
@@ -443,7 +467,7 @@ bool NdtScanMatcherNode::callback_sensor_points_main(
             << param_.frame.base_frame;
     diagnostics_scan_points_->update_level_and_message(
       diagnostic_msgs::msg::DiagnosticStatus::ERROR, message.str());
-    RCLCPP_ERROR_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
+    scan_logs.push_back({LogSite::ScanTransformFailed, message.str()});
     diagnostics_scan_points_->add_key_value("is_succeed_transform_sensor_points", false);
     return false;
   }
@@ -524,7 +548,7 @@ bool NdtScanMatcherNode::callback_sensor_points_main(
       diagnostics_scan_points_->update_level_and_message(
         diagnostic_msgs::msg::DiagnosticStatus::WARN, msg.str());
 
-      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, msg.str());
+      scan_logs.push_back({LogSite::ScanOutOfMapRange, msg.str()});
     }
 
     // perform ndt scan matching: align, judge the result, estimate its covariance
@@ -549,7 +573,7 @@ bool NdtScanMatcherNode::callback_sensor_points_main(
       std::stringstream message;
       message << "Score is below the threshold. Score: " << evaluation.score
               << ", Threshold: " << evaluation.score_threshold;
-      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
+      scan_logs.push_back({LogSite::ScanScoreBelowThreshold, message.str()});
     }
     const bool is_converged = evaluation.is_converged;
 

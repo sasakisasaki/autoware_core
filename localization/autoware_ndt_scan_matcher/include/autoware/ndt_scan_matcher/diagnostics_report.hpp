@@ -40,6 +40,24 @@ struct DiagnosticKeyValue
   std::variant<bool, int64_t, double, std::string> value;
 };
 
+// Where a log record came from. One value per call site rather than per severity, because
+// `RCLCPP_*_THROTTLE` keeps its throttle state per macro expansion: replaying two sites through
+// one macro would let either of them silence the other.
+enum class LogSite : uint8_t {
+  // The scan match hot path. All three were throttled at 1000 ms.
+  ScanTransformFailed,      // ERROR
+  ScanOutOfMapRange,        // WARN
+  ScanScoreBelowThreshold,  // WARN
+};
+
+// What a module would have logged. Recorded rather than emitted, so that the ROS node replays it
+// from one place no matter which of the gates returned.
+struct LogRequest
+{
+  LogSite site;
+  std::string message;
+};
+
 // Diagnostics accumulated while a module does its work: key/values plus an overall status (level +
 // message). Returned to the ROS node, which forwards it to a DiagnosticsInterface. Plain data,
 // kept ROS-free on purpose.
@@ -48,6 +66,7 @@ struct DiagnosticsReport
   DiagnosticLevel level{DiagnosticLevel::OK};
   std::string message;
   std::vector<DiagnosticKeyValue> key_values;
+  std::vector<LogRequest> logs;
 
   void add_key_value(DiagnosticKeyValue key_value) { key_values.push_back(std::move(key_value)); }
 
