@@ -70,6 +70,39 @@ struct DiagnosticsReport
 
   void add_key_value(DiagnosticKeyValue key_value) { key_values.push_back(std::move(key_value)); }
 
+  // A yes/no precondition, which is the shape most gates in this package have: record it as a key
+  // either way, and on failure raise the level and append the message. Returns `value`, so a call
+  // site reads as the condition it is:
+  //
+  //   if (!report.check("is_activated", is_activated, DiagnosticLevel::WARN,
+  //                     "Node is not activated.")) {
+  //     return false;
+  //   }
+  bool check(
+    std::string key, const bool value, const DiagnosticLevel level_on_failure,
+    const std::string & message_on_failure)
+  {
+    add_key_value({std::move(key), value});
+    if (!value) {
+      update_level_and_message(level_on_failure, message_on_failure);
+    }
+    return value;
+  }
+
+  // Folds a sub-report in: its keys and logs keep their order, and its level and message
+  // accumulate the same way a direct call would. Used where one gate delegates to a module that
+  // reports for itself.
+  void append(DiagnosticsReport other)
+  {
+    for (auto & key_value : other.key_values) {
+      key_values.push_back(std::move(key_value));
+    }
+    for (auto & log : other.logs) {
+      logs.push_back(std::move(log));
+    }
+    update_level_and_message(other.level, other.message);
+  }
+
   // Accumulates like DiagnosticsInterface: raises the level and appends the message.
   void update_level_and_message(DiagnosticLevel new_level, const std::string & new_message)
   {
