@@ -27,6 +27,7 @@
 #include <autoware/localization_util/smart_pose_buffer.hpp>
 #include <autoware_utils_diagnostics/diagnostics_interface.hpp>
 #include <autoware_utils_logging/logger_level_configure.hpp>
+#include <builtin_interfaces/msg/time.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2/transform_datatypes.hpp>
 
@@ -35,7 +36,9 @@
 #include <autoware_internal_localization_msgs/srv/pose_with_covariance_stamped.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -130,28 +133,108 @@ private:
     const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_input_ptr,
     pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_output_ptr);
 
-  void publish_tf(
-    const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg);
-  void publish_pose(
+  /**
+   * \brief Everything one scan publishes, assembled under the NDT lock and sent after it is
+   *        released.
+   *
+   * What is conditional is an `optional`, never a flag: `publish_scan_publication()` contains
+   * `if (opt)` and nothing else. In particular `is_converged` is not a field. It folds into
+   * whether `ndt_pose` and `ndt_pose_with_covariance` are engaged, while `tf` stays
+   * unconditional -- that asymmetry is what
+   * `NonConvergedScanSuppressesPoseButStillBroadcastsTf` exists to catch, and a bool at the
+   * publish site is exactly how it would be lost.
+   *
+   * The field order is the order the node published in before this struct existed, and
+   * `publish_scan_publication()` walks it top to bottom, so the order on the wire is unchanged.
+   */
+  struct ScanPublication
+  {
+    builtin_interfaces::msg::Time stamp;
+
+    // Went out ahead of everything below, from inside the covariance estimate.
+    std::optional<geometry_msgs::msg::PoseArray> multi_ndt_pose;
+    std::optional<geometry_msgs::msg::PoseArray> multi_initial_pose;
+
+    geometry_msgs::msg::PoseWithCovarianceStamped initial_pose_with_covariance;
+    float exe_time_ms{};
+    float transform_probability{};
+    float nearest_voxel_transformation_likelihood{};
+    int32_t iteration_num{};
+
+    geometry_msgs::msg::TransformStamped tf;  // unconditional
+
+    // Engaged together, only when the match converged.
+    std::optional<geometry_msgs::msg::PoseStamped> ndt_pose;
+    std::optional<geometry_msgs::msg::PoseWithCovarianceStamped> ndt_pose_with_covariance;
+
+    // The five below are borrowed from their publisher's pool rather than held by value. Under
+    // agnocast that borrow is what makes the publish zero-copy, and `points_aligned` alone is a
+    // full scan every cycle -- holding these by value would copy them into shared memory at
+    // publish time. A null pointer carries "absent" exactly as an `optional` would.
+    AUTOWARE_MESSAGE_UNIQUE_PTR(visualization_msgs::msg::MarkerArray) ndt_marker;
+
+    AUTOWARE_MESSAGE_UNIQUE_PTR(geometry_msgs::msg::PoseStamped) initial_to_result_relative_pose;
+    float initial_to_result_distance{};
+    float initial_to_result_distance_old{};
+    float initial_to_result_distance_new{};
+
+    AUTOWARE_MESSAGE_UNIQUE_PTR(sensor_msgs::msg::PointCloud2) points_aligned;
+    // Null unless someone subscribes: the per-point score colouring is a second pass over the scan.
+    AUTOWARE_MESSAGE_UNIQUE_PTR(sensor_msgs::msg::PointCloud2) voxel_score_points;
+
+    // The three go together or not at all, following no_ground_points.enable.
+    struct NoGroundScoreMessages
+    {
+      AUTOWARE_MESSAGE_UNIQUE_PTR(sensor_msgs::msg::PointCloud2) points;
+      float transform_probability{};
+      float nearest_voxel_transformation_likelihood{};
+    };
+    std::optional<NoGroundScoreMessages> no_ground;
+  };
+
+  // Sends what `callback_sensor_points_main` assembled. Called with the NDT lock released.
+  // Consumes its argument: the borrowed messages are moved into their publishers.
+  void publish_scan_publication(ScanPublication && output);
+
+  // The builders below return their message instead of sending it, so that the scan path can
+  // assemble under the lock and publish outside it.
+  geometry_msgs::msg::TransformStamped make_tf(
+    const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg) const;
+  geometry_msgs::msg::PoseStamped make_pose_stamped(
+    const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg) const;
+  geometry_msgs::msg::PoseWithCovarianceStamped make_pose_with_covariance(
     const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
-    const std::array<double, 36> & ndt_covariance, const bool is_converged);
+    const std::array<double, 36> & ndt_covariance) const;
+  // The two below fill a message already borrowed from its publisher, rather than returning one:
+  // under agnocast the borrow has to come from the publisher that will send it.
+  static void fill_point_cloud(
+    sensor_msgs::msg::PointCloud2 & msg, const rclcpp::Time & sensor_ros_time,
+    const std::string & frame_id, const pcl::PointCloud<PointSource> & points_in_map);
+  // Takes the marker slot count rather than the NDT, which keeps one more reference to it out of
+  // the publishing path.
+  void fill_ndt_marker(
+    visualization_msgs::msg::MarkerArray & msg, const rclcpp::Time & sensor_ros_time,
+    const std::vector<geometry_msgs::msg::Pose> & pose_array, int marker_slots) const;
+  // Fills the four initial-to-result fields of `output`.
+  void fill_initial_to_result(
+    ScanPublication & output, const rclcpp::Time & sensor_ros_time,
+    const geometry_msgs::msg::Pose & result_pose_msg,
+    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
+    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_old_msg,
+    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_new_msg) const;
+  // Fills the two pose arrays the covariance estimator searched, for the estimators that report
+  // them.
+  void fill_multi_poses(
+    ScanPublication & output, const rclcpp::Time & sensor_ros_time,
+    const ScanMatchCovariance & covariance_result) const;
+
+  // Publishes one aligned cloud on `points_aligned`. Still used by the align service, which
+  // publishes as it searches rather than assembling first.
   void publish_point_cloud(
     const rclcpp::Time & sensor_ros_time, const std::string & frame_id,
     const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr);
-  void publish_marker(
-    const rclcpp::Time & sensor_ros_time, const std::vector<geometry_msgs::msg::Pose> & pose_array,
-    NormalDistributionsTransform & ndt_ref);
-  void publish_initial_to_result(
-    const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
-    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
-    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_old_msg,
-    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_new_msg);
   void publish_loaded_map_if_present(
     MapUpdateModule::UpdateResult & result, const rclcpp::Time & stamp) const;
-
-  // Publishes the poses the covariance estimator searched, for the estimators that report them.
-  void publish_multi_poses(
-    const rclcpp::Time & sensor_ros_time, const ScanMatchCovariance & covariance_result);
 
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr visualize_point_score(
     const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr,
