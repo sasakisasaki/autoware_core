@@ -14,11 +14,8 @@
 
 #include "initial_pose_search.hpp"
 #include "ndt_scan_matcher_helper.hpp"
-#include "scan_match_no_ground_score.hpp"
-#include "scan_match_pipeline.hpp"
 
 #include <autoware/localization_util/matrix_type.hpp>
-#include <autoware/localization_util/tree_structured_parzen_estimator.hpp>
 #include <autoware/localization_util/util_func.hpp>
 #include <autoware/ndt_scan_matcher/ndt_scan_matcher_node.hpp>
 #include <autoware/ndt_scan_matcher/particle.hpp>
@@ -55,9 +52,6 @@ namespace autoware::ndt_scan_matcher
 {
 using autoware::localization_util::exchange_color_crc;
 using autoware::localization_util::matrix4f_to_pose;
-using autoware::localization_util::pose_to_matrix4f;
-
-using autoware::localization_util::TreeStructuredParzenEstimator;
 
 autoware_internal_debug_msgs::msg::Float32Stamped make_float32_stamped(
   const builtin_interfaces::msg::Time & stamp, const float data)
@@ -655,27 +649,6 @@ void NdtScanMatcherNode::fill_initial_to_result(
     initial_pose_old_msg.pose.pose.position, result_pose_msg.position));
   output.initial_to_result_distance_new = static_cast<float>(autoware::localization_util::norm(
     initial_pose_new_msg.pose.pose.position, result_pose_msg.position));
-}
-
-void NdtScanMatcherNode::fill_multi_poses(
-  ScanPublication & output, const rclcpp::Time & sensor_ros_time,
-  const ScanMatchCovariance & covariance_result) const
-{
-  const auto to_pose_array = [&](const std::vector<Eigen::Matrix4f> & poses) {
-    geometry_msgs::msg::PoseArray msg;
-    msg.header.stamp = sensor_ros_time;
-    msg.header.frame_id = param_.frame.map_frame;
-    for (const auto & pose : poses) {
-      msg.poses.push_back(matrix4f_to_pose(pose));
-    }
-    return msg;
-  };
-  if (covariance_result.multi_ndt_poses) {
-    output.multi_ndt_pose = to_pose_array(*covariance_result.multi_ndt_poses);
-  }
-  if (covariance_result.multi_initial_poses) {
-    output.multi_initial_pose = to_pose_array(*covariance_result.multi_initial_poses);
-  }
 }
 
 void NdtScanMatcherNode::service_trigger_node(

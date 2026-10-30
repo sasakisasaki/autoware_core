@@ -15,8 +15,6 @@
 #ifndef AUTOWARE__NDT_SCAN_MATCHER__NDT_SCAN_MATCHER_NODE_HPP_
 #define AUTOWARE__NDT_SCAN_MATCHER__NDT_SCAN_MATCHER_NODE_HPP_
 
-#define FMT_HEADER_ONLY
-
 #include "guarded.hpp"
 #include "hyper_parameters_loader.hpp"
 #include "map_update_module.hpp"
@@ -34,19 +32,15 @@
 #include <autoware_internal_debug_msgs/msg/float32_stamped.hpp>
 #include <autoware_internal_debug_msgs/msg/int32_stamped.hpp>
 #include <autoware_internal_localization_msgs/srv/pose_with_covariance_stamped.hpp>
-#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <geometry_msgs/msg/twist_stamped.hpp>
-#include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include <fmt/format.h>
 #include <pcl/point_types.h>
 
 #ifdef ROS_DISTRO_GALACTIC
@@ -56,21 +50,14 @@
 #endif
 
 #include <array>
-#include <deque>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
-#include <thread>
 #include <tuple>
 #include <vector>
 
 namespace autoware::ndt_scan_matcher
 {
-struct ScanMatchCovariance;
-
 using DiagnosticsInterface =
   autoware_utils_diagnostics::BasicDiagnosticsInterface<autoware::agnocast_wrapper::Node>;
 
@@ -220,11 +207,6 @@ private:
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_old_msg,
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_new_msg) const;
-  // Fills the two pose arrays the covariance estimator searched, for the estimators that report
-  // them.
-  void fill_multi_poses(
-    ScanPublication & output, const rclcpp::Time & sensor_ros_time,
-    const ScanMatchCovariance & covariance_result) const;
 
   // Publishes one aligned cloud on `points_aligned`. Still used by the align service, which
   // publishes as it searches rather than assembling first.
