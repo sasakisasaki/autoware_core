@@ -21,10 +21,10 @@
 #include "hyper_parameters_loader.hpp"
 #include "map_update_module.hpp"
 #include "ndt_omp/multigrid_ndt_omp.h"
+#include "pose_interpolation_buffer.hpp"
 
 #include <autoware/agnocast_wrapper/node.hpp>
 #include <autoware/agnocast_wrapper/tf2.hpp>
-#include <autoware/localization_util/smart_pose_buffer.hpp>
 #include <autoware_utils_diagnostics/diagnostics_interface.hpp>
 #include <autoware_utils_logging/logger_level_configure.hpp>
 #include <builtin_interfaces/msg/time.hpp>
@@ -259,7 +259,7 @@ private:
   // Interpolates the regularization pose topic at the scan time, dropping poses older than it.
   // Returns std::nullopt when no pose brackets the scan time.
   std::optional<Eigen::Matrix4f> interpolate_regularization_pose(
-    const rclcpp::Time & sensor_ros_time);
+    const rclcpp::Time & sensor_ros_time, std::vector<LogRequest> & logs);
 
   // Performs the pcd_loader service call for MapUpdateModule, returning nullptr on failure.
   MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr
@@ -328,12 +328,12 @@ private:
 
   pcl::shared_ptr<pcl::PointCloud<PointSource>> sensor_points_in_baselink_frame_;
 
-  std::unique_ptr<autoware::localization_util::SmartPoseBuffer> initial_pose_buffer_;
+  std::unique_ptr<PoseInterpolationBuffer> initial_pose_buffer_;
 
   // Keep latest position for dynamic map loading
   Guarded<std::optional<geometry_msgs::msg::Point>> latest_ekf_position_{std::nullopt};
 
-  std::unique_ptr<autoware::localization_util::SmartPoseBuffer> regularization_pose_buffer_;
+  std::unique_ptr<PoseInterpolationBuffer> regularization_pose_buffer_;
 
   std::atomic<bool> is_activated_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_scan_points_;

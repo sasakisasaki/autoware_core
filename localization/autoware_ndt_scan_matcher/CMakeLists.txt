@@ -51,6 +51,7 @@ ament_auto_add_library(${PROJECT_NAME}_core SHARED
   src/map_update_module.cpp
   src/ndt_scan_matcher_helper.cpp
   src/particle.cpp
+  src/pose_interpolation_buffer.cpp
   src/scan_match_alignment.cpp
   src/scan_match_covariance.cpp
   src/scan_match_evaluation.cpp

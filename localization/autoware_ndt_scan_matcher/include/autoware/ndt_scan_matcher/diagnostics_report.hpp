@@ -44,6 +44,12 @@ struct DiagnosticKeyValue
 // `RCLCPP_*_THROTTLE` keeps its throttle state per macro expansion: replaying two sites through
 // one macro would let either of them silence the other.
 enum class LogSite : uint8_t {
+  // PoseInterpolationBuffer's four, inherited from SmartPoseBuffer. None of these were throttled.
+  PoseBufferTooFewSamples,      // INFO
+  PoseBufferStampMismatch,      // INFO
+  PoseBufferTimeoutViolation,   // WARN
+  PoseBufferDistanceViolation,  // WARN
+
   // The scan match hot path. All three were throttled at 1000 ms.
   ScanTransformFailed,      // ERROR
   ScanOutOfMapRange,        // WARN

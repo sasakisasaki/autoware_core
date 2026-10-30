@@ -42,6 +42,7 @@
 #include <autoware/ndt_scan_matcher/hyper_parameters.hpp>
 #include <autoware/ndt_scan_matcher/map_update_module.hpp>
 #include <autoware/ndt_scan_matcher/particle.hpp>
+#include <autoware/ndt_scan_matcher/pose_interpolation_buffer.hpp>
 
 namespace
 {
@@ -56,4 +57,5 @@ namespace
 [[maybe_unused]] autoware::ndt_scan_matcher::ScanMatchEvaluation scan_match_evaluation_instance;
 [[maybe_unused]] autoware::ndt_scan_matcher::ScanMatchCovariance scan_match_covariance_instance;
 [[maybe_unused]] autoware::ndt_scan_matcher::ScanMatchOutput scan_match_output_instance;
+[[maybe_unused]] autoware::ndt_scan_matcher::PoseInterpolationBuffer buffer_instance{1.0, 1.0};
 }  // namespace
