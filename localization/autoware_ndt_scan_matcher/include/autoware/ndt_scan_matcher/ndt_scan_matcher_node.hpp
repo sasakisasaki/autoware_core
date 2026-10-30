@@ -105,29 +105,10 @@ private:
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
     sensor_points_msg_in_sensor_frame);
 
-  // A TF lookup the node has already done. `transform` is empty when it failed, and `error` then
-  // carries the exception text, which the diagnostics message prefixes -- a bool could not say
-  // that.
-  struct TransformLookup
-  {
-    std::optional<geometry_msgs::msg::TransformStamped> transform;
-    std::string error;
-  };
-
   // Looks up base_link <- sensor_frame. Equal frames yield a default transform rather than an
   // empty one: the scan path short-circuits on equal frames, but it still has to get past the
   // "did the lookup succeed" gate to reach that point.
-  TransformLookup lookup_base_from_sensor(const std::string & sensor_frame);
-
-  // Fills `report` rather than writing to a diagnostics interface or a logger, so that the caller
-  // forwards and replays from one place regardless of which gate returned.
-  // `now`, `base_from_sensor` and `voxel_score_points_wanted` are things the node looked up for
-  // it: this function reads no clock, holds no TF buffer and asks no publisher who is listening.
-  bool callback_sensor_points_main(
-    const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
-      sensor_points_msg_in_sensor_frame,
-    const rclcpp::Time & now, const TransformLookup & base_from_sensor,
-    bool voxel_score_points_wanted, DiagnosticsReport & report);
+  ScanMatchingModule::TransformLookup lookup_base_from_sensor(const std::string & sensor_frame);
 
   void service_trigger_node(
     const std_srvs::srv::SetBool::Request::SharedPtr req,
@@ -205,7 +186,11 @@ private:
     std::optional<NoGroundScoreMessages> no_ground;
   };
 
-  // Sends what `callback_sensor_points_main` assembled. Called with the NDT lock released.
+  // Turns what the module produced into the messages to send, borrowing each from its own
+  // publisher.
+  ScanPublication build_scan_publication(const ScanMatchingModule::Output & out);
+
+  // Sends what `build_scan_publication` assembled. Called with the NDT lock released.
   // Consumes its argument: the borrowed messages are moved into their publishers.
   void publish_scan_publication(ScanPublication && output);
 
@@ -248,10 +233,6 @@ private:
     const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr);
   void publish_loaded_map_if_present(
     MapUpdateModule::UpdateResult & result, const rclcpp::Time & stamp) const;
-
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr visualize_point_score(
-    const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr,
-    const float & lower_nvs, const float & upper_nvs, NormalDistributionsTransform & ndt_ref);
 
   // Performs the pcd_loader service call for MapUpdateModule, returning nullptr on failure.
   MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr
