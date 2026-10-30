@@ -16,6 +16,7 @@
 #define AUTOWARE__NDT_SCAN_MATCHER__POSE_INTERPOLATION_BUFFER_HPP_
 
 #include <autoware/ndt_scan_matcher/diagnostics_report.hpp>
+#include <builtin_interfaces/msg/time.hpp>
 
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
@@ -28,6 +29,12 @@
 
 namespace autoware::ndt_scan_matcher
 {
+
+/// A message stamp as a single integer, which is how this layer talks about time.
+inline int64_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
+{
+  return static_cast<int64_t>(stamp.sec) * 1000000000LL + static_cast<int64_t>(stamp.nanosec);
+}
 
 /**
  * \brief A time-ordered buffer of stamped poses, interpolated at a requested time.

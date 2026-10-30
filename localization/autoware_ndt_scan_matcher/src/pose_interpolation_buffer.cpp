@@ -44,11 +44,6 @@ double to_seconds(const int64_t nanoseconds)
   return static_cast<double>(nanoseconds) / 1e9;
 }
 
-int64_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
-{
-  return static_cast<int64_t>(stamp.sec) * 1000000000LL + static_cast<int64_t>(stamp.nanosec);
-}
-
 /// `autoware_utils_geometry::get_rpy`, which is `tf2::Matrix3x3(q).getRPY(...)` and nothing else.
 geometry_msgs::msg::Vector3 get_rpy(const geometry_msgs::msg::Pose & pose)
 {

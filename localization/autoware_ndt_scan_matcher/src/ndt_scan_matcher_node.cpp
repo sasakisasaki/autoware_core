@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "initial_pose_intake.hpp"
 #include "initial_pose_search.hpp"
 #include "ndt_scan_matcher_helper.hpp"
 #include "scan_match_no_ground_score.hpp"
@@ -120,10 +119,6 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
         "regularization_pose_with_covariance", 10,
         std::bind(&NdtScanMatcherNode::callback_regularization_pose, this, std::placeholders::_1),
         initial_pose_sub_opt);
-    const double value_as_unlimited = 1000.0;
-    regularization_pose_buffer_ =
-      std::make_unique<PoseInterpolationBuffer>(value_as_unlimited, value_as_unlimited);
-
     diagnostics_regularization_pose_ =
       std::make_unique<DiagnosticsInterface>(this, "regularization_pose_subscriber_status");
   }
@@ -192,9 +187,13 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
 
   ndt_ptr_.with([&](const auto & ndt_ptr) { ndt_ptr->setParams(param_.ndt); });
 
-  initial_pose_buffer_ = std::make_unique<PoseInterpolationBuffer>(
-    param_.validation.initial_pose_timeout_sec,
-    param_.validation.initial_pose_distance_tolerance_m);
+  ScanMatchingModule::Params scan_matching_param;
+  scan_matching_param.map_frame = param_.frame.map_frame;
+  scan_matching_param.initial_pose_timeout_sec = param_.validation.initial_pose_timeout_sec;
+  scan_matching_param.initial_pose_distance_tolerance_m =
+    param_.validation.initial_pose_distance_tolerance_m;
+  scan_matching_param.ndt_regularization_enable = param_.ndt_regularization_enable;
+  scan_matching_module_ = std::make_unique<ScanMatchingModule>(scan_matching_param);
 
   // ROS-dependent resources for the map update module are owned by this node.
   loaded_pcd_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -314,7 +313,7 @@ void NdtScanMatcherNode::callback_timer()
   }
 
   // check is_set_last_update_position
-  const auto latest_ekf_position = latest_ekf_position_.with([](const auto & pos) { return pos; });
+  const auto latest_ekf_position = scan_matching_module_->latest_ekf_position();
   const bool is_set_last_update_position = (latest_ekf_position != std::nullopt);
   diagnostics_map_update_->add_key_value(
     "is_set_last_update_position", is_set_last_update_position);
@@ -340,29 +339,12 @@ void NdtScanMatcherNode::callback_initial_pose(
 {
   diagnostics_initial_pose_->clear();
 
-  callback_initial_pose_main(initial_pose_msg_ptr);
+  DiagnosticsReport report;
+  scan_matching_module_->push_initial_pose(
+    *initial_pose_msg_ptr, static_cast<bool>(is_activated_), report);
+  apply_diagnostics_update(*diagnostics_initial_pose_, report);
 
   diagnostics_initial_pose_->publish(initial_pose_msg_ptr->header.stamp);
-}
-
-void NdtScanMatcherNode::callback_initial_pose_main(
-  const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
-  initial_pose_msg_ptr)
-{
-  DiagnosticsReport intake_report;
-  const InitialPoseIntake intake = check_initial_pose(
-    static_cast<rclcpp::Time>(initial_pose_msg_ptr->header.stamp).nanoseconds(),
-    initial_pose_msg_ptr->header.frame_id, param_.frame.map_frame, static_cast<bool>(is_activated_),
-    intake_report);
-  apply_diagnostics_update(*diagnostics_initial_pose_, intake_report);
-  if (!intake.is_accepted()) {
-    return;
-  }
-
-  initial_pose_buffer_->push_back(
-    std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(*initial_pose_msg_ptr));
-
-  latest_ekf_position_.with([&](auto & pos) { pos = initial_pose_msg_ptr->pose.pose.position; });
 }
 
 void NdtScanMatcherNode::callback_regularization_pose(
@@ -374,8 +356,7 @@ void NdtScanMatcherNode::callback_regularization_pose(
   diagnostics_regularization_pose_->add_key_value(
     "topic_time_stamp", static_cast<rclcpp::Time>(pose_conv_msg_ptr->header.stamp).nanoseconds());
 
-  regularization_pose_buffer_->push_back(
-    std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(*pose_conv_msg_ptr));
+  scan_matching_module_->push_regularization_pose(*pose_conv_msg_ptr);
 
   diagnostics_regularization_pose_->publish(pose_conv_msg_ptr->header.stamp);
 }
@@ -520,7 +501,7 @@ bool NdtScanMatcherNode::callback_sensor_points_main(
 
     // calculate initial pose
     std::optional<PoseInterpolationBuffer::InterpolateResult> interpolation_result_opt =
-      initial_pose_buffer_->interpolate(sensor_ros_time.nanoseconds(), report.logs);
+      scan_matching_module_->interpolate_initial_pose(sensor_ros_time.nanoseconds(), report.logs);
 
     // check is_succeed_interpolate_initial_pose
     const bool is_succeed_interpolate_initial_pose = (interpolation_result_opt != std::nullopt);
@@ -534,16 +515,14 @@ bool NdtScanMatcherNode::callback_sensor_points_main(
       return false;
     }
 
-    initial_pose_buffer_->pop_old(sensor_ros_time.nanoseconds());
     const PoseInterpolationBuffer::InterpolateResult & interpolation_result =
       interpolation_result_opt.value();
 
-    // if regularization is enabled and available, look up the pose to regularize towards. The
-    // buffer only exists when regularization is enabled, so the check stays here.
+    // The pose to regularize towards, if regularization is enabled and one brackets the scan.
+    // The module answers with nullopt in either case, so there is no enable check here.
     const std::optional<Eigen::Matrix4f> regularization_pose =
-      param_.ndt_regularization_enable
-        ? interpolate_regularization_pose(sensor_ros_time, report.logs)
-        : std::nullopt;
+      scan_matching_module_->interpolate_regularization_pose(
+        sensor_ros_time.nanoseconds(), report.logs);
 
     // Warn if the lidar has gone out of the map range
     if (
@@ -902,20 +881,6 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr NdtScanMatcherNode::visualize_point_score
   return nvs_points_in_map_ptr_rgb;
 }
 
-std::optional<Eigen::Matrix4f> NdtScanMatcherNode::interpolate_regularization_pose(
-  const rclcpp::Time & sensor_ros_time, std::vector<LogRequest> & logs)
-{
-  std::optional<PoseInterpolationBuffer::InterpolateResult> interpolation_result_opt =
-    regularization_pose_buffer_->interpolate(sensor_ros_time.nanoseconds(), logs);
-  if (!interpolation_result_opt) {
-    return std::nullopt;
-  }
-  regularization_pose_buffer_->pop_old(sensor_ros_time.nanoseconds());
-  const PoseInterpolationBuffer::InterpolateResult & interpolation_result =
-    interpolation_result_opt.value();
-  return pose_to_matrix4f(interpolation_result.interpolated_pose.pose.pose);
-}
-
 void NdtScanMatcherNode::service_trigger_node(
   const std_srvs::srv::SetBool::Request::SharedPtr req,
   std_srvs::srv::SetBool::Response::SharedPtr res)
@@ -927,7 +892,7 @@ void NdtScanMatcherNode::service_trigger_node(
 
   is_activated_ = req->data;
   if (is_activated_) {
-    initial_pose_buffer_->clear();
+    scan_matching_module_->clear_initial_pose_buffer();
   }
   res->success = true;
 

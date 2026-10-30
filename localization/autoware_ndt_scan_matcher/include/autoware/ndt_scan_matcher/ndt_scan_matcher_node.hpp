@@ -21,7 +21,7 @@
 #include "hyper_parameters_loader.hpp"
 #include "map_update_module.hpp"
 #include "ndt_omp/multigrid_ndt_omp.h"
-#include "pose_interpolation_buffer.hpp"
+#include "scan_matching_module.hpp"
 
 #include <autoware/agnocast_wrapper/node.hpp>
 #include <autoware/agnocast_wrapper/tf2.hpp>
@@ -94,9 +94,6 @@ private:
   void callback_timer();
 
   void callback_initial_pose(
-    const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
-    initial_pose_msg_ptr);
-  void callback_initial_pose_main(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(geometry_msgs::msg::PoseWithCovarianceStamped) &
     initial_pose_msg_ptr);
 
@@ -256,11 +253,6 @@ private:
     const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr,
     const float & lower_nvs, const float & upper_nvs, NormalDistributionsTransform & ndt_ref);
 
-  // Interpolates the regularization pose topic at the scan time, dropping poses older than it.
-  // Returns std::nullopt when no pose brackets the scan time.
-  std::optional<Eigen::Matrix4f> interpolate_regularization_pose(
-    const rclcpp::Time & sensor_ros_time, std::vector<LogRequest> & logs);
-
   // Performs the pcd_loader service call for MapUpdateModule, returning nullptr on failure.
   MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr
   get_differential_point_cloud_map(
@@ -328,13 +320,6 @@ private:
 
   pcl::shared_ptr<pcl::PointCloud<PointSource>> sensor_points_in_baselink_frame_;
 
-  std::unique_ptr<PoseInterpolationBuffer> initial_pose_buffer_;
-
-  // Keep latest position for dynamic map loading
-  Guarded<std::optional<geometry_msgs::msg::Point>> latest_ekf_position_{std::nullopt};
-
-  std::unique_ptr<PoseInterpolationBuffer> regularization_pose_buffer_;
-
   std::atomic<bool> is_activated_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_scan_points_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_initial_pose_;
@@ -343,6 +328,7 @@ private:
   std::unique_ptr<DiagnosticsInterface> diagnostics_ndt_align_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_trigger_node_;
   std::unique_ptr<MapUpdateModule> map_update_module_;
+  std::unique_ptr<ScanMatchingModule> scan_matching_module_;
   std::unique_ptr<
     autoware_utils_logging::BasicLoggerLevelConfigure<autoware::agnocast_wrapper::Node>>
     logger_configure_;
