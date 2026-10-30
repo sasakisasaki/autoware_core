@@ -107,12 +107,30 @@ private:
   void callback_sensor_points(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
     sensor_points_msg_in_sensor_frame);
+
+  // A TF lookup the node has already done. `transform` is empty when it failed, and `error` then
+  // carries the exception text, which the diagnostics message prefixes -- a bool could not say
+  // that.
+  struct TransformLookup
+  {
+    std::optional<geometry_msgs::msg::TransformStamped> transform;
+    std::string error;
+  };
+
+  // Looks up base_link <- sensor_frame. Equal frames yield a default transform rather than an
+  // empty one: the scan path short-circuits on equal frames, but it still has to get past the
+  // "did the lookup succeed" gate to reach that point.
+  TransformLookup lookup_base_from_sensor(const std::string & sensor_frame);
+
   // Fills `report` rather than writing to a diagnostics interface or a logger, so that the caller
   // forwards and replays from one place regardless of which gate returned.
+  // `now`, `base_from_sensor` and `voxel_score_points_wanted` are things the node looked up for
+  // it: this function reads no clock, holds no TF buffer and asks no publisher who is listening.
   bool callback_sensor_points_main(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
       sensor_points_msg_in_sensor_frame,
-    DiagnosticsReport & report);
+    const rclcpp::Time & now, const TransformLookup & base_from_sensor,
+    bool voxel_score_points_wanted, DiagnosticsReport & report);
 
   void service_trigger_node(
     const std_srvs::srv::SetBool::Request::SharedPtr req,
@@ -130,11 +148,6 @@ private:
   std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> align_pose(
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_with_cov,
     NormalDistributionsTransform & ndt_ref);
-
-  void transform_sensor_measurement(
-    const std::string & source_frame, const std::string & target_frame,
-    const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_input_ptr,
-    pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_output_ptr);
 
   /**
    * \brief Everything one scan publishes, assembled under the NDT lock and sent after it is
