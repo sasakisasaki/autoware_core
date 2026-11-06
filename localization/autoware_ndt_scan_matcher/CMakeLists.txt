@@ -45,6 +45,7 @@ endif()
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/hyper_parameters_loader.cpp
   src/map_update_module.cpp
+  src/ndt_scan_matcher.cpp
   src/ndt_scan_matcher_node.cpp
   src/ndt_scan_matcher_helper.cpp
   src/particle.cpp
@@ -128,6 +129,12 @@ if(BUILD_TESTING)
     test/test_map_update_module.cpp
   )
   target_link_libraries(test_map_update_module ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
+
+  # Unit tests for the scan matching core, driven by map cells built in the test (no ROS service).
+  ament_auto_add_gtest(test_ndt_scan_matcher
+    test/test_ndt_scan_matcher.cpp
+  )
+  target_link_libraries(test_ndt_scan_matcher ${PROJECT_NAME} multigrid_ndt_omp ${PCL_LIBRARIES})
 endif()
 
 autoware_ament_auto_package(
