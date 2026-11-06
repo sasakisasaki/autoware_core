@@ -144,6 +144,10 @@ private:
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_old_msg,
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_new_msg);
+  // Applies the NDT update decided by MapUpdateModule. Call it while holding secondary_ndt_ptr_.
+  void apply_ndt_update(
+    MapUpdateModule::UpdateResult & result,
+    std::shared_ptr<NormalDistributionsTransform> & secondary_ndt_ptr);
   void publish_loaded_map_if_present(
     MapUpdateModule::UpdateResult & result, const rclcpp::Time & stamp) const;
 
@@ -219,8 +223,14 @@ private:
 
   rclcpp::CallbackGroup::SharedPtr timer_callback_group_;
 
+  // To prevent deadlocks, acquire locks in the following order:
+  // secondary_ndt_ptr_ -> ndt_ptr_
   Guarded<std::shared_ptr<NormalDistributionsTransform>> ndt_ptr_{
     std::make_shared<NormalDistributionsTransform>()};
+  // The NDT that differential map updates are built on, so that scan matching on ndt_ptr_ is only
+  // blocked while the pointers are swapped. Its lock also keeps the map update of the timer and the
+  // one of the align service from interleaving.
+  Guarded<std::shared_ptr<NormalDistributionsTransform>> secondary_ndt_ptr_;
 
   pcl::shared_ptr<pcl::PointCloud<PointSource>> sensor_points_in_baselink_frame_;
 
