@@ -20,11 +20,29 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
 namespace autoware::ndt_scan_matcher
 {
+
+bool out_of_map_range(
+  const geometry_msgs::msg::Point & position,
+  const std::optional<geometry_msgs::msg::Point> & last_update_position,
+  const HyperParameters::DynamicMapLoading & param)
+{
+  if (last_update_position == std::nullopt) {
+    return true;
+  }
+
+  const double dx = position.x - last_update_position->x;
+  const double dy = position.y - last_update_position->y;
+  const double distance = std::hypot(dx, dy);
+
+  // check distance_last_update_position_to_current_position
+  return (distance + param.lidar_radius > param.map_radius);
+}
 
 MapUpdateModule::MapUpdateModule(
   HyperParameters::DynamicMapLoading param, PcdLoaderFunction pcd_loader)
@@ -36,34 +54,26 @@ MapUpdateModule::UpdateResult MapUpdateModule::update_map_if_moved(
   const geometry_msgs::msg::Point & position)
 {
   UpdateResult result;
-
-  result.map_updated = builder_state_.with([&](auto & builder_state) {
-    if (!should_update_map(builder_state, position, result.diagnostics)) {
-      return false;
-    }
-    const bool updated = update_map_internal(builder_state, position, result);
-    if (updated && param_.publish_loaded_map) {
-      result.loaded_pcd_map = merge_loaded_pcd_map(result.diagnostics);
-    }
-    return updated;
-  });
+  if (!should_update_map(position, result.diagnostics)) {
+    return result;
+  }
+  result.map_updated = update_map_internal(position, result);
+  if (result.map_updated && param_.publish_loaded_map) {
+    result.loaded_pcd_map = merge_loaded_pcd_map(result.diagnostics);
+  }
   return result;
 }
 
 bool MapUpdateModule::should_update_map(
-  BuilderState & builder_state, const geometry_msgs::msg::Point & position,
-  DiagnosticsReport & diagnostics)
+  const geometry_msgs::msg::Point & position, DiagnosticsReport & diagnostics)
 {
-  const auto last_update_position =
-    last_update_position_.with([](const auto & pos) { return pos; });
-
-  if (last_update_position == std::nullopt) {
-    builder_state.need_rebuild = true;
+  if (last_update_position_ == std::nullopt) {
+    need_rebuild_ = true;
     return true;
   }
 
-  const double dx = position.x - last_update_position->x;
-  const double dy = position.y - last_update_position->y;
+  const double dx = position.x - last_update_position_->x;
+  const double dy = position.y - last_update_position_->y;
   const double distance = std::hypot(dx, dy);
 
   // check distance_last_update_position_to_current_position
@@ -74,44 +84,27 @@ bool MapUpdateModule::should_update_map(
 
     // If the map does not keep up with the current position,
     // have the caller rebuild its NDT entirely, holding its lock until it is done.
-    builder_state.need_rebuild = true;
+    need_rebuild_ = true;
   }
 
   return distance > param_.update_distance;
 }
 
-bool MapUpdateModule::out_of_map_range(const geometry_msgs::msg::Point & position)
-{
-  const auto last_update_position =
-    last_update_position_.with([](const auto & pos) { return pos; });
-
-  if (last_update_position == std::nullopt) {
-    return true;
-  }
-
-  const double dx = position.x - last_update_position->x;
-  const double dy = position.y - last_update_position->y;
-  const double distance = std::hypot(dx, dy);
-
-  // check distance_last_update_position_to_current_position
-  return (distance + param_.lidar_radius > param_.map_radius);
-}
-
 bool MapUpdateModule::update_map_internal(
-  BuilderState & builder_state, const geometry_msgs::msg::Point & position, UpdateResult & result)
+  const geometry_msgs::msg::Point & position, UpdateResult & result)
 {
   DiagnosticsReport & diagnostics = result.diagnostics;
-  diagnostics.add_key_value({"is_need_rebuild", builder_state.need_rebuild});
+  diagnostics.add_key_value({"is_need_rebuild", need_rebuild_});
 
   // If the current position is super far from the previous loading position,
   // rebuild the NDT from scratch. The caller clears its NDT even if no cell can be fetched.
-  if (builder_state.need_rebuild) {
-    builder_state.loaded_map_ids.clear();
+  if (need_rebuild_) {
+    loaded_map_ids_.clear();
     // The map is rebuilt from scratch, so reset the accumulated debug map as well.
     loaded_pcd_map_.clear();
     result.ndt_update = NdtUpdate{true, nullptr};
 
-    const auto cells = fetch_map_cells(builder_state, position, diagnostics);
+    const auto cells = fetch_map_cells(position, diagnostics);
     const bool updated = (cells != nullptr);
 
     // check is_updated_map
@@ -122,20 +115,20 @@ bool MapUpdateModule::update_map_internal(
         "update_ndt failed. If this happens with initial position estimation, make sure that"
         "(1) the initial position matches the pcd map and (2) the map_loader is working "
         "properly.");
-      last_update_position_.with([&](auto & pos) { pos = position; });
+      last_update_position_ = position;
       return false;
     }
 
-    builder_state.need_rebuild = false;
+    need_rebuild_ = false;
     result.ndt_update->cells = cells;
   } else {
-    const auto cells = fetch_map_cells(builder_state, position, diagnostics);
+    const auto cells = fetch_map_cells(position, diagnostics);
     const bool updated = (cells != nullptr);
 
     // check is_updated_map
     diagnostics.add_key_value({"is_updated_map", updated});
     if (!updated) {
-      last_update_position_.with([&](auto & pos) { pos = position; });
+      last_update_position_ = position;
 
       return false;
     }
@@ -144,7 +137,7 @@ bool MapUpdateModule::update_map_internal(
   }
 
   // Memorize the position of the last update
-  last_update_position_.with([&](auto & pos) { pos = position; });
+  last_update_position_ = position;
 
   return true;
 }
@@ -153,23 +146,19 @@ MapUpdateModule::UpdateResult MapUpdateModule::update_map(
   const geometry_msgs::msg::Point & position)
 {
   UpdateResult result;
-  result.map_updated = builder_state_.with([&](auto & builder_state) {
-    const bool updated = update_map_internal(builder_state, position, result);
-    if (updated && param_.publish_loaded_map) {
-      result.loaded_pcd_map = merge_loaded_pcd_map(result.diagnostics);
-    }
-    return updated;
-  });
+  result.map_updated = update_map_internal(position, result);
+  if (result.map_updated && param_.publish_loaded_map) {
+    result.loaded_pcd_map = merge_loaded_pcd_map(result.diagnostics);
+  }
   return result;
 }
 
 MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr
 MapUpdateModule::fetch_map_cells(
-  BuilderState & builder_state, const geometry_msgs::msg::Point & position,
-  DiagnosticsReport & diagnostics)
+  const geometry_msgs::msg::Point & position, DiagnosticsReport & diagnostics)
 {
   diagnostics.add_key_value(
-    {"maps_size_before", static_cast<int64_t>(builder_state.loaded_map_ids.size())});
+    {"maps_size_before", static_cast<int64_t>(loaded_map_ids_.size())});
 
   auto request = std::make_shared<GetDifferentialPointCloudMap::Request>();
 
@@ -177,7 +166,7 @@ MapUpdateModule::fetch_map_cells(
   request->area.center_y = static_cast<float>(position.y);
   request->area.radius = static_cast<float>(param_.map_radius);
   request->cached_ids.assign(
-    builder_state.loaded_map_ids.begin(), builder_state.loaded_map_ids.end());
+    loaded_map_ids_.begin(), loaded_map_ids_.end());
 
   // Fetch the differential point cloud map. The ROS node performs the actual service call.
   auto response = pcd_loader_(request);
@@ -203,7 +192,7 @@ MapUpdateModule::fetch_map_cells(
   }
 
   for (const auto & map : maps_to_add) {
-    builder_state.loaded_map_ids.insert(map.cell_id);
+    loaded_map_ids_.insert(map.cell_id);
 
     // Keep the loaded cloud for the debug publish. Stored as the received PointCloud2 to avoid a
     // PCL round-trip, keyed by cell id so it can be erased when the cell is dropped.
@@ -213,14 +202,14 @@ MapUpdateModule::fetch_map_cells(
   }
 
   for (const std::string & map_id_to_remove : map_ids_to_remove) {
-    builder_state.loaded_map_ids.erase(map_id_to_remove);
+    loaded_map_ids_.erase(map_id_to_remove);
     if (param_.publish_loaded_map) {
       loaded_pcd_map_.erase(map_id_to_remove);
     }
   }
 
   diagnostics.add_key_value(
-    {"maps_size_after", static_cast<int64_t>(builder_state.loaded_map_ids.size())});
+    {"maps_size_after", static_cast<int64_t>(loaded_map_ids_.size())});
 
   return response;
 }
