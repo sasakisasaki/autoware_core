@@ -71,31 +71,6 @@ autoware_internal_debug_msgs::msg::Int32Stamped make_int32_stamped(
   return autoware_internal_debug_msgs::build<T>().stamp(stamp).data(data);
 }
 
-// Adds and removes the given map cells on the NDT. Returns the time it took in milliseconds.
-double apply_map_cells(
-  pclomp::MultiGridNormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> & ndt,
-  const MapUpdateModule::GetDifferentialPointCloudMap::Response & cells)
-{
-  const auto exe_start_time = std::chrono::system_clock::now();
-
-  for (const auto & map : cells.new_pointcloud_with_ids) {
-    auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-    pcl::fromROSMsg(map.pointcloud, *cloud);
-    ndt.addTarget(cloud, map.cell_id);
-  }
-
-  for (const std::string & map_id_to_remove : cells.ids_to_remove) {
-    ndt.removeTarget(map_id_to_remove);
-  }
-
-  ndt.createVoxelKdtree();
-
-  const auto exe_end_time = std::chrono::system_clock::now();
-  const auto duration_micro_sec =
-    std::chrono::duration_cast<std::chrono::microseconds>(exe_end_time - exe_start_time).count();
-  return static_cast<double>(duration_micro_sec) / 1000.0;
-}
-
 NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
 : autoware::agnocast_wrapper::Node("ndt_scan_matcher", options),
   tf2_broadcaster_(*this),
@@ -212,7 +187,7 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
       std::placeholders::_2),
     service_qos, sensor_callback_group);
 
-  ndt_ptr_.with([&](const auto & ndt_ptr) { ndt_ptr->setParams(param_.ndt); });
+  ndt_scan_matcher_ = std::make_unique<NdtScanMatcher>(NdtScanMatcherConfig{param_.ndt});
 
   initial_pose_buffer_ = std::make_unique<SmartPoseBuffer>(
     this->get_logger(), param_.validation.initial_pose_timeout_sec,
@@ -224,15 +199,12 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
   pcd_loader_client_ =
     this->create_client<MapUpdateModule::GetDifferentialPointCloudMap>("pcd_loader_service");
 
-  map_update_state_.with([&](auto & state) {
-    state.module = std::make_unique<MapUpdateModule>(
+  map_update_module_.with([&](auto & module) {
+    module = std::make_unique<MapUpdateModule>(
       param_.dynamic_map_loading,
       [this](const MapUpdateModule::GetDifferentialPointCloudMap::Request::SharedPtr & request) {
         return this->get_differential_point_cloud_map(request);
       });
-    state.secondary_ndt_ptr = ndt_ptr_.with([](const auto & ndt_ptr) {
-      return std::make_shared<NormalDistributionsTransform>(*ndt_ptr);
-    });
   });
 
   scan_match_diagnostics_ = std::make_unique<ScanMatchDiagnostics>(ScanMatchDiagnosticsConfig{
@@ -292,69 +264,19 @@ void NdtScanMatcherNode::apply_diagnostics_update(
 MapUpdateModule::UpdateResult NdtScanMatcherNode::run_map_update(
   const MapUpdateEntry entry, const geometry_msgs::msg::Point & position)
 {
-  return map_update_state_.with([&](auto & state) {
-    auto result = ((*state.module).*entry)(position);
-    apply_ndt_update(result, state.secondary_ndt_ptr);
+  return map_update_module_.with([&](auto & module) {
+    auto result = ((*module).*entry)(position);
+    if (result.ndt_update.has_value()) {
+      const auto exe_time = ndt_scan_matcher_->update_map(result.ndt_update.value());
+      if (exe_time.has_value()) {
+        result.diagnostics.add_key_value({"map_update_execution_time", exe_time.value()});
+      }
+    }
     // Updated after the NDT, so the out-of-map check never runs against a position whose map has
     // not been applied yet.
-    last_map_update_position_.with(
-      [&](auto & pos) { pos = state.module->last_update_position(); });
+    last_map_update_position_.with([&](auto & pos) { pos = module->last_update_position(); });
     return result;
   });
-}
-
-void NdtScanMatcherNode::apply_ndt_update(
-  MapUpdateModule::UpdateResult & result,
-  std::shared_ptr<NormalDistributionsTransform> & secondary_ndt_ptr)
-{
-  if (!result.ndt_update.has_value()) {
-    return;
-  }
-  const MapUpdateModule::NdtUpdate & ndt_update = result.ndt_update.value();
-
-  if (ndt_update.clear) {
-    // Rebuild the NDT in place, holding ndt_ptr_'s lock until it is done: scan matching on a map
-    // that no longer covers the vehicle is not allowed.
-    ndt_ptr_.with([&](auto & ndt_ptr) {
-      const auto param = ndt_ptr->getParams();
-      ndt_ptr.reset(new NormalDistributionsTransform);
-      ndt_ptr->setParams(param);
-
-      if (ndt_update.cells) {
-        const double exe_time = apply_map_cells(*ndt_ptr, *ndt_update.cells);
-        result.diagnostics.add_key_value({"map_update_execution_time", exe_time});
-        secondary_ndt_ptr = std::make_shared<NormalDistributionsTransform>(*ndt_ptr);
-      }
-    });
-    return;
-  }
-
-  // Load the map to secondary_ndt_ptr, which does not require ndt_ptr_'s lock.
-  // Since the update of the secondary ndt ptr and the NDT align (done on
-  // the main ndt_ptr_) overlap, the latency of updating/alignment reduces partly.
-  // If the updating is done the main ndt_ptr_, either the update or the NDT
-  // align will be blocked by the other.
-  const double exe_time = apply_map_cells(*secondary_ndt_ptr, *ndt_update.cells);
-  result.diagnostics.add_key_value({"map_update_execution_time", exe_time});
-
-  // Update the NDT map pointer with minimal lock duration to prevent latency spikes.
-  // Heavy memory operations (cloning and destruction) are executed outside the ndt_ptr_'slock,
-  // while only the fast pointer swap is performed inside the lock scope.
-
-  // 1. Clone the contents of secondary_ndt_ptr to create new_ndt_ptr.
-  auto new_ndt_ptr = std::make_shared<NormalDistributionsTransform>(*secondary_ndt_ptr);
-
-  // 2. Swap the pointers inside the ndt_ptr_'s lock.
-  // - During the swap, the reference count does not decrease to zero,
-  //   so the heavy destructor is not called here.
-  // - This prevents the align process of NdtScanMatcherNode from being
-  //   blocked for a long time.
-  ndt_ptr_.with([&](auto & ndt_ptr) { std::swap(ndt_ptr, new_ndt_ptr); });
-
-  // 3. Handle potential destruction outside the lock.
-  // - new_ndt_ptr now holds the old NDT. Even if its heavy destructor
-  //   is triggered when this block ends, it happens safely outside the lock.
-  new_ndt_ptr.reset();
 }
 
 void NdtScanMatcherNode::publish_loaded_map_if_present(
@@ -581,7 +503,7 @@ bool NdtScanMatcherNode::callback_sensor_points_main(
     return false;
   }
 
-  return ndt_ptr_.with([&](const auto & ndt_ptr) {
+  return ndt_scan_matcher_->with_ndt([&](const auto & ndt_ptr) {
     // store sensor points for ndt alignment
     sensor_points_in_baselink_frame_ = sensor_points_in_baselink_frame;
 
@@ -1150,7 +1072,7 @@ void NdtScanMatcherNode::service_ndt_align_main(
 
   publish_loaded_map_if_present(result, this->now());
 
-  ndt_ptr_.with([&](auto & ndt_ptr) {
+  ndt_scan_matcher_->with_ndt([&](const auto & ndt_ptr) {
     // check is_set_map_points
     bool is_set_map_points = ndt_ptr->hasTarget();
     diagnostics_ndt_align_->add_key_value("is_set_map_points", is_set_map_points);
