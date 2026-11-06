@@ -212,12 +212,7 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
       std::placeholders::_2),
     service_qos, sensor_callback_group);
 
-  ndt_ptr_.with([&](const auto & ndt_ptr) {
-    ndt_ptr->setParams(param_.ndt);
-    secondary_ndt_ptr_.with([&](auto & secondary_ndt_ptr) {
-      secondary_ndt_ptr = std::make_shared<NormalDistributionsTransform>(*ndt_ptr);
-    });
-  });
+  ndt_ptr_.with([&](const auto & ndt_ptr) { ndt_ptr->setParams(param_.ndt); });
 
   initial_pose_buffer_ = std::make_unique<SmartPoseBuffer>(
     this->get_logger(), param_.validation.initial_pose_timeout_sec,
@@ -229,11 +224,16 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
   pcd_loader_client_ =
     this->create_client<MapUpdateModule::GetDifferentialPointCloudMap>("pcd_loader_service");
 
-  map_update_module_ = std::make_unique<MapUpdateModule>(
-    param_.dynamic_map_loading,
-    [this](const MapUpdateModule::GetDifferentialPointCloudMap::Request::SharedPtr & request) {
-      return this->get_differential_point_cloud_map(request);
+  map_update_state_.with([&](auto & state) {
+    state.module = std::make_unique<MapUpdateModule>(
+      param_.dynamic_map_loading,
+      [this](const MapUpdateModule::GetDifferentialPointCloudMap::Request::SharedPtr & request) {
+        return this->get_differential_point_cloud_map(request);
+      });
+    state.secondary_ndt_ptr = ndt_ptr_.with([](const auto & ndt_ptr) {
+      return std::make_shared<NormalDistributionsTransform>(*ndt_ptr);
     });
+  });
 
   scan_match_diagnostics_ = std::make_unique<ScanMatchDiagnostics>(ScanMatchDiagnosticsConfig{
     param_.validation.initial_to_result_distance_tolerance_m,
@@ -287,6 +287,20 @@ void NdtScanMatcherNode::apply_diagnostics_update(
       key_value.value);
   }
   diagnostics.update_level_and_message(static_cast<int8_t>(report.level), report.message);
+}
+
+MapUpdateModule::UpdateResult NdtScanMatcherNode::run_map_update(
+  const MapUpdateEntry entry, const geometry_msgs::msg::Point & position)
+{
+  return map_update_state_.with([&](auto & state) {
+    auto result = ((*state.module).*entry)(position);
+    apply_ndt_update(result, state.secondary_ndt_ptr);
+    // Updated after the NDT, so the out-of-map check never runs against a position whose map has
+    // not been applied yet.
+    last_map_update_position_.with(
+      [&](auto & pos) { pos = state.module->last_update_position(); });
+    return result;
+  });
 }
 
 void NdtScanMatcherNode::apply_ndt_update(
@@ -384,11 +398,8 @@ void NdtScanMatcherNode::callback_timer()
     return;
   }
 
-  auto result = secondary_ndt_ptr_.with([&](auto & secondary_ndt_ptr) {
-    auto update_result = map_update_module_->update_map_if_moved(latest_ekf_position.value());
-    apply_ndt_update(update_result, secondary_ndt_ptr);
-    return update_result;
-  });
+  auto result =
+    run_map_update(&MapUpdateModule::update_map_if_moved, latest_ekf_position.value());
   apply_diagnostics_update(*diagnostics_map_update_, result.diagnostics);
 
   publish_loaded_map_if_present(result, ros_time_now);
@@ -613,9 +624,12 @@ bool NdtScanMatcherNode::callback_sensor_points_main(
     }
 
     // Warn if the lidar has gone out of the map range
-    if (
-      map_update_module_->out_of_map_range(
-        interpolation_result.interpolated_pose.pose.pose.position)) {
+    const auto last_map_update_position =
+      last_map_update_position_.with([](const auto & pos) { return pos; });
+    const bool is_out_of_map_range = out_of_map_range(
+      interpolation_result.interpolated_pose.pose.pose.position, last_map_update_position,
+      param_.dynamic_map_loading);
+    if (is_out_of_map_range) {
       std::stringstream msg;
 
       msg << "Lidar has gone out of the map range";
@@ -1130,12 +1144,8 @@ void NdtScanMatcherNode::service_ndt_align_main(
   auto initial_pose_msg_in_map_frame =
     autoware::localization_util::transform(req->pose_with_covariance, transform_s2t);
   initial_pose_msg_in_map_frame.header.stamp = req->pose_with_covariance.header.stamp;
-  auto result = secondary_ndt_ptr_.with([&](auto & secondary_ndt_ptr) {
-    auto update_result =
-      map_update_module_->update_map(initial_pose_msg_in_map_frame.pose.pose.position);
-    apply_ndt_update(update_result, secondary_ndt_ptr);
-    return update_result;
-  });
+  auto result = run_map_update(
+    &MapUpdateModule::update_map, initial_pose_msg_in_map_frame.pose.pose.position);
   apply_diagnostics_update(*diagnostics_ndt_align_, result.diagnostics);
 
   publish_loaded_map_if_present(result, this->now());

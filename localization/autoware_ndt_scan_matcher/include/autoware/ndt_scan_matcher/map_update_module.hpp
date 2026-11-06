@@ -16,7 +16,6 @@
 #define AUTOWARE__NDT_SCAN_MATCHER__MAP_UPDATE_MODULE_HPP_
 
 #include "diagnostics_report.hpp"
-#include "guarded.hpp"
 #include "hyper_parameters.hpp"
 
 #include <autoware_map_msgs/srv/get_differential_point_cloud_map.hpp>
@@ -32,8 +31,16 @@
 namespace autoware::ndt_scan_matcher
 {
 
+// Whether the lidar range around `position` reaches beyond the map loaded around
+// `last_update_position`. Always true before the first map update.
+bool out_of_map_range(
+  const geometry_msgs::msg::Point & position,
+  const std::optional<geometry_msgs::msg::Point> & last_update_position,
+  const HyperParameters::DynamicMapLoading & param);
+
 // Decides when the map around the vehicle has to be reloaded and fetches the map cells for it.
 // It holds no NDT: the caller owns the NDT and applies the returned NdtUpdate to it.
+// Not thread-safe: the caller serializes the calls.
 class MapUpdateModule
 {
 public:
@@ -72,15 +79,6 @@ public:
     std::optional<sensor_msgs::msg::PointCloud2> loaded_pcd_map;
   };
 
-private:
-  struct BuilderState
-  {
-    bool need_rebuild{true};
-    // The cell ids the caller's NDT holds once every returned NdtUpdate has been applied.
-    std::set<std::string> loaded_map_ids;
-  };
-
-public:
   MapUpdateModule(HyperParameters::DynamicMapLoading param, PcdLoaderFunction pcd_loader);
 
   // Updates the map only when the vehicle has moved far enough from the last update position.
@@ -89,22 +87,22 @@ public:
   // Updates the map around the given position unconditionally.
   UpdateResult update_map(const geometry_msgs::msg::Point & position);
 
-  bool out_of_map_range(const geometry_msgs::msg::Point & position);
+  // The position the map was last updated around, whether the update succeeded or not.
+  [[nodiscard]] const std::optional<geometry_msgs::msg::Point> & last_update_position() const
+  {
+    return last_update_position_;
+  }
 
 private:
   [[nodiscard]] bool should_update_map(
-    BuilderState & builder_state, const geometry_msgs::msg::Point & position,
-    DiagnosticsReport & diagnostics);
+    const geometry_msgs::msg::Point & position, DiagnosticsReport & diagnostics);
 
   // Returns true if the map was actually updated.
-  bool update_map_internal(
-    BuilderState & builder_state, const geometry_msgs::msg::Point & position,
-    UpdateResult & result);
+  bool update_map_internal(const geometry_msgs::msg::Point & position, UpdateResult & result);
 
   // Fetches the cells that differ from the loaded ones, or nullptr when there is nothing to update.
   GetDifferentialPointCloudMap::Response::ConstSharedPtr fetch_map_cells(
-    BuilderState & builder_state, const geometry_msgs::msg::Point & position,
-    DiagnosticsReport & diagnostics);
+    const geometry_msgs::msg::Point & position, DiagnosticsReport & diagnostics);
 
   // Concatenates the cells kept in loaded_pcd_map_ into a single cloud for the debug publish.
   // A cell that cannot be concatenated (mismatching field layout) is skipped and reported as a
@@ -113,17 +111,15 @@ private:
     DiagnosticsReport & diagnostics) const;
 
   PcdLoaderFunction pcd_loader_;
-
-  // To prevent deadlocks, acquire locks in the following order:
-  // builder_state_ -> last_update_position_
-  Guarded<BuilderState> builder_state_;
-  Guarded<std::optional<geometry_msgs::msg::Point>> last_update_position_{std::nullopt};
-
   HyperParameters::DynamicMapLoading param_;
+
+  bool need_rebuild_{true};
+  // The cell ids the caller's NDT holds once every returned NdtUpdate has been applied.
+  std::set<std::string> loaded_map_ids_;
+  std::optional<geometry_msgs::msg::Point> last_update_position_;
 
   // Loaded point cloud map cells for the debug publish, keyed by cell id so that cells dropped by
   // a differential update can be erased. Only populated when param_.publish_loaded_map is enabled.
-  // Accessed only while builder_state_'s lock is held.
   std::map<std::string, sensor_msgs::msg::PointCloud2> loaded_pcd_map_;
 };
 

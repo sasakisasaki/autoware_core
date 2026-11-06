@@ -144,7 +144,12 @@ private:
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_old_msg,
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_new_msg);
-  // Applies the NDT update decided by MapUpdateModule. Call it while holding secondary_ndt_ptr_.
+  using MapUpdateEntry =
+    MapUpdateModule::UpdateResult (MapUpdateModule::*)(const geometry_msgs::msg::Point &);
+  // Runs one map update through the given MapUpdateModule entry point and applies it to the NDT.
+  MapUpdateModule::UpdateResult run_map_update(
+    MapUpdateEntry entry, const geometry_msgs::msg::Point & position);
+  // Applies the NDT update decided by MapUpdateModule. Call it while holding map_update_state_.
   void apply_ndt_update(
     MapUpdateModule::UpdateResult & result,
     std::shared_ptr<NormalDistributionsTransform> & secondary_ndt_ptr);
@@ -224,13 +229,25 @@ private:
   rclcpp::CallbackGroup::SharedPtr timer_callback_group_;
 
   // To prevent deadlocks, acquire locks in the following order:
-  // secondary_ndt_ptr_ -> ndt_ptr_
+  // 1. map_update_state_ -> ndt_ptr_
+  // 2. map_update_state_ -> last_map_update_position_
+  // 3. ndt_ptr_ -> last_map_update_position_
   Guarded<std::shared_ptr<NormalDistributionsTransform>> ndt_ptr_{
     std::make_shared<NormalDistributionsTransform>()};
-  // The NDT that differential map updates are built on, so that scan matching on ndt_ptr_ is only
-  // blocked while the pointers are swapped. Its lock also keeps the map update of the timer and the
-  // one of the align service from interleaving.
-  Guarded<std::shared_ptr<NormalDistributionsTransform>> secondary_ndt_ptr_;
+
+  // Everything a map update touches. Its lock keeps the map update of the timer and the one of the
+  // align service from interleaving.
+  struct MapUpdateState
+  {
+    std::unique_ptr<MapUpdateModule> module;
+    // The NDT that differential map updates are built on, so that scan matching on ndt_ptr_ is
+    // only blocked while the pointers are swapped.
+    std::shared_ptr<NormalDistributionsTransform> secondary_ndt_ptr;
+  };
+  Guarded<MapUpdateState> map_update_state_;
+  // A copy of the module's last update position for the out-of-map check of the scan matching,
+  // which must not wait for a map update in progress.
+  Guarded<std::optional<geometry_msgs::msg::Point>> last_map_update_position_{std::nullopt};
 
   pcl::shared_ptr<pcl::PointCloud<PointSource>> sensor_points_in_baselink_frame_;
 
@@ -249,7 +266,6 @@ private:
   std::unique_ptr<DiagnosticsInterface> diagnostics_map_update_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_ndt_align_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_trigger_node_;
-  std::unique_ptr<MapUpdateModule> map_update_module_;
   std::unique_ptr<
     autoware_utils_logging::BasicLoggerLevelConfigure<autoware::agnocast_wrapper::Node>>
     logger_configure_;

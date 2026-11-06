@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -152,18 +153,33 @@ TEST_F(MapUpdateModuleTest, RequestsWithIdsOfLoadedCells)  // NOLINT
   EXPECT_EQ(cached_ids, std::vector<std::string>{"0"});
 }
 
-// out_of_map_range is true before any update, false at the last update position, and true again
-// once the query moves beyond (map_radius - lidar_radius) from it.
-TEST_F(MapUpdateModuleTest, OutOfMapRangeTracksLastUpdate)  // NOLINT
+// The module remembers where it last updated the map, which is what out_of_map_range compares
+// against.
+TEST_F(MapUpdateModuleTest, RemembersPositionOfLastUpdate)  // NOLINT
 {
   MapUpdateModule module(param_, make_loader_returning_cell());
 
-  EXPECT_TRUE(module.out_of_map_range(make_point(0.0, 0.0)));  // nothing loaded yet
+  module.update_map(make_point(3.0, 4.0));
 
-  ASSERT_TRUE(module.update_map(make_point(0.0, 0.0)).map_updated);
+  ASSERT_TRUE(module.last_update_position().has_value());
+  EXPECT_DOUBLE_EQ(module.last_update_position()->x, 3.0);
+  EXPECT_DOUBLE_EQ(module.last_update_position()->y, 4.0);
+}
 
-  EXPECT_FALSE(module.out_of_map_range(make_point(0.0, 0.0)));   // at the last update position
-  EXPECT_TRUE(module.out_of_map_range(make_point(100.0, 0.0)));  // 100 + 5 > 30
+TEST_F(MapUpdateModuleTest, OutOfMapRangeBeforeAnyUpdate)  // NOLINT
+{
+  EXPECT_TRUE(out_of_map_range(make_point(0.0, 0.0), std::nullopt, param_));
+}
+
+TEST_F(MapUpdateModuleTest, WithinMapRangeAtLastUpdatePosition)  // NOLINT
+{
+  EXPECT_FALSE(out_of_map_range(make_point(0.0, 0.0), make_point(0.0, 0.0), param_));
+}
+
+// The lidar range reaches past the loaded map once the distance exceeds map_radius - lidar_radius.
+TEST_F(MapUpdateModuleTest, OutOfMapRangeBeyondMapRadiusMinusLidarRadius)  // NOLINT
+{
+  EXPECT_TRUE(out_of_map_range(make_point(26.0, 0.0), make_point(0.0, 0.0), param_));  // 26+5 > 30
 }
 
 // update_map_if_moved skips the update when the vehicle has not moved farther than update_distance.
