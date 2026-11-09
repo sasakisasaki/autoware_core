@@ -199,6 +199,12 @@ public:
     const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
     const ScanMatchInput & input);
 
+  // Searches for the pose of the last kept scan around initial_pose by aligning it from particles
+  // sampled by its covariance, with the yaw sampled uniformly. Fails when no map or no scan is set.
+  tl::expected<InitialPoseEstimationResult, NdtScanMatcherError> estimate_initial_pose(
+    const geometry_msgs::msg::PoseWithCovariance & initial_pose);
+
+private:
   // Aligns the scan to the map starting from initial_pose, decides whether it converged and
   // estimates the pose covariance, all on the same map. A regularization pose pulls the alignment
   // towards it.
@@ -213,12 +219,6 @@ public:
     const pcl::PointCloud<pcl::PointXYZ> & sensor_points_in_map,
     const geometry_msgs::msg::Pose & result_pose, bool compute_voxel_scores);
 
-  // Searches for the pose of the last kept scan around initial_pose by aligning it from particles
-  // sampled by its covariance, with the yaw sampled uniformly. Fails when no map or no scan is set.
-  tl::expected<InitialPoseEstimationResult, NdtScanMatcherError> estimate_initial_pose(
-    const geometry_msgs::msg::PoseWithCovariance & initial_pose);
-
-private:
   // scan_match() up to the result of this scan; scan_match() adds the check over successive scans.
   ScanMatchOutput scan_match_main(
     const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
