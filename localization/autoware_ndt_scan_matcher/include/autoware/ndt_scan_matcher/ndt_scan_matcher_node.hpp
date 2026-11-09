@@ -138,8 +138,15 @@ private:
     const rclcpp::Time & sensor_ros_time, const std::string & frame_id,
     const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr);
   void publish_marker(
-    const rclcpp::Time & sensor_ros_time, const std::vector<geometry_msgs::msg::Pose> & pose_array,
-    NormalDistributionsTransform & ndt_ref);
+    const rclcpp::Time & sensor_ros_time, const std::vector<geometry_msgs::msg::Pose> & pose_array);
+  void publish_multi_ndt_poses(
+    const rclcpp::Time & sensor_ros_time, const NdtScanMatcherResult::Debug & debug);
+  // Publishes every debug output of a scan matching. Each one keeps its own condition.
+  void publish_debug(
+    const rclcpp::Time & sensor_ros_time, const float exe_time,
+    const autoware::localization_util::SmartPoseBuffer::InterpolateResult & interpolation_result,
+    const pcl::PointCloud<PointSource> & sensor_points_in_baselink_frame,
+    const NdtScanMatcherResult & result);
   void publish_initial_to_result(
     const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
@@ -153,18 +160,12 @@ private:
   void publish_loaded_map_if_present(
     MapUpdateModule::UpdateResult & result, const rclcpp::Time & stamp) const;
 
-  static int count_oscillation(const std::vector<geometry_msgs::msg::Pose> & result_pose_msg_array);
+  static pcl::PointCloud<pcl::PointXYZRGB>::Ptr visualize_point_score(
+    const pcl::PointCloud<pcl::PointXYZI> & nvs_points_in_map_i, const float & lower_nvs,
+    const float & upper_nvs);
 
-  Eigen::Matrix2d estimate_covariance(
-    const pclomp::NdtResult & ndt_result, const Eigen::Matrix4f & initial_pose_matrix,
-    const rclcpp::Time & sensor_ros_time, NormalDistributionsTransform & ndt_ref);
-
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr visualize_point_score(
-    const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr,
-    const float & lower_nvs, const float & upper_nvs, NormalDistributionsTransform & ndt_ref);
-
-  void add_regularization_pose(
-    const rclcpp::Time & sensor_ros_time, NormalDistributionsTransform & ndt_ref);
+  std::optional<geometry_msgs::msg::Pose> interpolate_regularization_pose(
+    const rclcpp::Time & sensor_ros_time);
 
   // Performs the pcd_loader service call for MapUpdateModule, returning nullptr on failure.
   MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr
@@ -228,7 +229,6 @@ private:
   // To prevent deadlocks, acquire locks in the following order:
   // 1. map_update_module_ -> the NDT locks inside ndt_scan_matcher_
   // 2. map_update_module_ -> last_map_update_position_
-  // 3. the NDT lock of ndt_scan_matcher_->with_ndt() -> last_map_update_position_
   std::unique_ptr<NdtScanMatcher> ndt_scan_matcher_;
 
   // Its lock keeps the map update of the timer and the one of the align service from interleaving.
