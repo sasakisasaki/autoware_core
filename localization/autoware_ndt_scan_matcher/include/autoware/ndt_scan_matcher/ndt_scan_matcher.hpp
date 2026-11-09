@@ -32,7 +32,6 @@
 #include <array>
 #include <memory>
 #include <optional>
-#include <string>
 #include <vector>
 
 namespace autoware::ndt_scan_matcher
@@ -146,9 +145,6 @@ public:
   tl::expected<InitialPoseEstimationResult, NdtScanMatcherError> estimate_initial_pose(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr & sensor_points_in_base_link,
     const geometry_msgs::msg::PoseWithCovariance & initial_pose);
-
-  // The ids of the map cells currently held in the NDT, sorted.
-  std::vector<std::string> map_ids();
 
 private:
   NdtScanMatcherConfig config_;

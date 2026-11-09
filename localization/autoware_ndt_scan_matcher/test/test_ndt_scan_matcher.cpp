@@ -53,15 +53,28 @@ NdtScanMatcherConfig make_default_config()
   return config;
 }
 
-// Map cells as MapUpdateModule fetches them; every added cell holds the sample cubic pcd.
+// The x position of a map cell, by its numeric id. The cells are far enough apart that a scan
+// matches one of them only.
+double cell_x(const std::string & id)
+{
+  constexpr double cell_spacing = 100.0;  // [m]
+  return std::stod(id) * cell_spacing;
+}
+
+// Map cells as MapUpdateModule fetches them; every added cell holds the sample cubic pcd, moved
+// to its cell_x().
 Cells::ConstSharedPtr make_cells(
   const std::vector<std::string> & ids_to_add, const std::vector<std::string> & ids_to_remove)
 {
   auto cells = std::make_shared<Cells>();
   for (const auto & id : ids_to_add) {
+    pcl::PointCloud<pcl::PointXYZ> points = make_sample_half_cubic_pcd();
+    for (auto & point : points) {
+      point.x += static_cast<float>(cell_x(id));
+    }
     autoware_map_msgs::msg::PointCloudMapCellWithID cell;
     cell.cell_id = id;
-    pcl::toROSMsg(make_sample_half_cubic_pcd(), cell.pointcloud);
+    pcl::toROSMsg(points, cell.pointcloud);
     cells->new_pointcloud_with_ids.push_back(cell);
   }
   cells->ids_to_remove = ids_to_remove;
@@ -113,6 +126,20 @@ geometry_msgs::msg::PoseWithCovariance make_pose_with_covariance(const double x,
   return pose;
 }
 
+bool holds_no_map(NdtScanMatcher & scan_matcher)
+{
+  const auto result = scan_matcher.align(make_scan(), make_pose(0.0, 0.0, 0.0), std::nullopt);
+  return !result.has_value() && result.error() == NdtScanMatcherError::MAP_NOT_SET;
+}
+
+// Whether a scan taken at the cell converges, which needs the cell in the map.
+bool matches_cell(NdtScanMatcher & scan_matcher, const std::string & id)
+{
+  const auto result =
+    scan_matcher.align(make_scan(), make_pose(cell_x(id) + 0.5, 0.3, 0.0), std::nullopt);
+  return result.has_value() && result->is_converged;
+}
+
 NdtScanMatcherConfig make_initial_pose_estimation_config(const int64_t particles_num)
 {
   NdtScanMatcherConfig config = make_default_config();
@@ -135,7 +162,7 @@ TEST(NdtScanMatcher, HoldsNoMapBeforeFirstUpdate)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_default_config());
 
-  EXPECT_TRUE(scan_matcher.map_ids().empty());
+  EXPECT_TRUE(holds_no_map(scan_matcher));
 }
 
 TEST(NdtScanMatcher, LoadsCellsOnRebuild)  // NOLINT
@@ -144,7 +171,7 @@ TEST(NdtScanMatcher, LoadsCellsOnRebuild)  // NOLINT
 
   scan_matcher.update_map(make_rebuild({"0"}));
 
-  EXPECT_EQ(scan_matcher.map_ids(), std::vector<std::string>{"0"});
+  EXPECT_TRUE(matches_cell(scan_matcher, "0"));
 }
 
 TEST(NdtScanMatcher, ReplacesMapOnRebuild)  // NOLINT
@@ -154,7 +181,8 @@ TEST(NdtScanMatcher, ReplacesMapOnRebuild)  // NOLINT
 
   scan_matcher.update_map(make_rebuild({"1"}));
 
-  EXPECT_EQ(scan_matcher.map_ids(), std::vector<std::string>{"1"});
+  EXPECT_TRUE(matches_cell(scan_matcher, "1"));
+  EXPECT_FALSE(matches_cell(scan_matcher, "0"));
 }
 
 TEST(NdtScanMatcher, LeavesMapEmptyWhenRebuildHasNoCells)  // NOLINT
@@ -164,7 +192,7 @@ TEST(NdtScanMatcher, LeavesMapEmptyWhenRebuildHasNoCells)  // NOLINT
 
   scan_matcher.update_map(MapUpdateModule::NdtUpdate{true, nullptr});
 
-  EXPECT_TRUE(scan_matcher.map_ids().empty());
+  EXPECT_TRUE(holds_no_map(scan_matcher));
 }
 
 // A differential update builds on the map of the preceding rebuild.
@@ -175,7 +203,8 @@ TEST(NdtScanMatcher, AddsCellsOnDifferentialUpdate)  // NOLINT
 
   scan_matcher.update_map(make_differential_update({"1"}, {}));
 
-  EXPECT_EQ(scan_matcher.map_ids(), (std::vector<std::string>{"0", "1"}));
+  EXPECT_TRUE(matches_cell(scan_matcher, "0"));
+  EXPECT_TRUE(matches_cell(scan_matcher, "1"));
 }
 
 TEST(NdtScanMatcher, RemovesCellsOnDifferentialUpdate)  // NOLINT
@@ -185,7 +214,8 @@ TEST(NdtScanMatcher, RemovesCellsOnDifferentialUpdate)  // NOLINT
 
   scan_matcher.update_map(make_differential_update({}, {"0"}));
 
-  EXPECT_EQ(scan_matcher.map_ids(), std::vector<std::string>{"1"});
+  EXPECT_TRUE(matches_cell(scan_matcher, "1"));
+  EXPECT_FALSE(matches_cell(scan_matcher, "0"));
 }
 
 TEST(NdtScanMatcher, ReportsBuildTimeWhenCellsAreApplied)  // NOLINT
@@ -226,16 +256,6 @@ TEST(NdtScanMatcher, ThrowsWhenDifferentialUpdateHasNoCells)  // NOLINT
 
   EXPECT_THROW(
     scan_matcher.update_map(MapUpdateModule::NdtUpdate{false, nullptr}), std::invalid_argument);
-}
-
-TEST(NdtScanMatcher, ReportsMapNotSetWhenAligningBeforeFirstUpdate)  // NOLINT
-{
-  NdtScanMatcher scan_matcher(make_default_config());
-
-  const auto result = scan_matcher.align(make_scan(), make_pose(0.0, 0.0, 0.0), std::nullopt);
-
-  ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(result.error(), NdtScanMatcherError::MAP_NOT_SET);
 }
 
 TEST(NdtScanMatcher, ConvergesToTheMapFromANearbyInitialPose)  // NOLINT
