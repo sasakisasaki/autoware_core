@@ -15,16 +15,26 @@
 #ifndef AUTOWARE__NDT_SCAN_MATCHER__NDT_SCAN_MATCHER_HPP_
 #define AUTOWARE__NDT_SCAN_MATCHER__NDT_SCAN_MATCHER_HPP_
 
+#include "diagnostics_report.hpp"
 #include "guarded.hpp"
 #include "hyper_parameters.hpp"
 #include "map_update_module.hpp"
 #include "ndt_omp/multigrid_ndt_omp.h"
 #include "particle.hpp"
+#include "scan_match_diagnostics.hpp"
 
+#include <Eigen/Core>
+#include <autoware/localization_util/smart_pose_buffer.hpp>
+#include <builtin_interfaces/msg/time.hpp>
 #include <tl_expected/expected.hpp>
 
+#include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -32,18 +42,11 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace autoware::ndt_scan_matcher
 {
-
-struct NdtScanMatcherConfig
-{
-  pclomp::NdtParams ndt;
-  HyperParameters::ScoreEstimation score_estimation;
-  HyperParameters::Covariance covariance;
-  HyperParameters::InitialPoseEstimation initial_pose_estimation;
-};
 
 enum class NdtScanMatcherError {
   MAP_NOT_SET,
@@ -106,25 +109,83 @@ struct InitialPoseEstimationResult
   struct Debug
   {
     std::vector<Particle> particles;  // in the order they were searched
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr sensor_points_in_base_link;  // the scan searched with
   } debug;
+};
+
+using InterpolatedPose = autoware::localization_util::SmartPoseBuffer::InterpolateResult;
+
+// What scan_match() takes from the ROS runtime and from the rest of the node.
+struct ScanMatchInput
+{
+  builtin_interfaces::msg::Time now;
+  // The sensor to base_link transform, or the error text of its TF lookup.
+  tl::expected<Eigen::Matrix4f, std::string> sensor_to_base_link;
+  bool is_activated{false};
+  // The initial pose interpolated to the scan time, if it could be.
+  std::optional<InterpolatedPose> initial_pose;
+  // The regularization pose interpolated to the scan time, when regularization is enabled and it
+  // could be.
+  std::optional<geometry_msgs::msg::Pose> regularization_pose;
+  std::optional<geometry_msgs::msg::Point> last_map_update_position;
+  bool compute_voxel_scores{false};
+};
+
+// A log line of the scan matching, for the node to write with a throttle per kind.
+struct ScanMatchLog
+{
+  enum class Kind { TF_LOOKUP_FAILED, OUT_OF_MAP_RANGE, SCORE_BELOW_THRESHOLD };
+  Kind kind;
+  std::string message;
+};
+
+// What the debug outputs of a scan matching are made from.
+struct ScanMatchDebug
+{
+  float exe_time;
+  InterpolatedPose interpolation_result;
+  NdtScanMatcherResult result;
+  pcl::PointCloud<pcl::PointXYZ> sensor_points_in_map;
+  NdtScanMatcherDebugScores scores;
+};
+
+// Everything a scan matching produces, for the node to log and publish.
+struct ScanMatchOutput
+{
+  bool is_succeed{false};  // whether the pose converged
+  // Whether the scan got as far as using the input poses, so the node removes the poses older
+  // than the scan from its buffers.
+  bool used_input_poses{false};
+  DiagnosticsReport diagnostics;  // complete, ready to publish
+  std::vector<ScanMatchLog> logs;
+  std::optional<geometry_msgs::msg::TransformStamped> tf;
+  std::optional<geometry_msgs::msg::PoseStamped> ndt_pose;
+  std::optional<geometry_msgs::msg::PoseWithCovarianceStamped> ndt_pose_with_covariance;
+  std::optional<ScanMatchDebug> debug;
 };
 
 // Matches sensor scans against the point cloud map held in its NDT.
 //
-// update_map() and the NDT access may be called from different threads: a differential map update
-// is built aside and only swapped in, so it blocks scan matching just for the swap.
+// update_map() and the scan matching may be called from different threads: a differential map
+// update is built aside and only swapped in, so it blocks scan matching just for the swap.
 class NdtScanMatcher
 {
 public:
   using NormalDistributionsTransform =
     pclomp::MultiGridNormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>;
 
-  explicit NdtScanMatcher(const NdtScanMatcherConfig & config);
+  explicit NdtScanMatcher(const HyperParameters & param);
 
   // Applies a map update fetched by MapUpdateModule. A rebuild clears the map and holds scan
   // matching until the new map is built. Returns the time spent building the map in milliseconds,
   // or nullopt when a rebuild had no cells and left the map empty.
   std::optional<double> update_map(const MapUpdateModule::NdtUpdate & update);
+
+  // Checks the scan, aligns it from the initial pose and reports the result as diagnostics, logs
+  // and messages to publish. A scan passing the input checks is kept for estimate_initial_pose().
+  ScanMatchOutput scan_match(
+    const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
+    const ScanMatchInput & input);
 
   // Aligns the scan to the map starting from initial_pose, decides whether it converged and
   // estimates the pose covariance, all on the same map. A regularization pose pulls the alignment
@@ -140,14 +201,22 @@ public:
     const pcl::PointCloud<pcl::PointXYZ> & sensor_points_in_map,
     const geometry_msgs::msg::Pose & result_pose, bool compute_voxel_scores);
 
-  // Searches for the pose of the scan around initial_pose by aligning it from particles sampled
-  // by its covariance, with the yaw sampled uniformly. Fails when no map or no scan is set.
+  // Searches for the pose of the last kept scan around initial_pose by aligning it from particles
+  // sampled by its covariance, with the yaw sampled uniformly. Fails when no map or no scan is set.
   tl::expected<InitialPoseEstimationResult, NdtScanMatcherError> estimate_initial_pose(
-    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr & sensor_points_in_base_link,
     const geometry_msgs::msg::PoseWithCovariance & initial_pose);
 
 private:
-  NdtScanMatcherConfig config_;
+  // scan_match() up to the result of this scan; scan_match() adds the check over successive scans.
+  ScanMatchOutput scan_match_main(
+    const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
+    const ScanMatchInput & input);
+
+  HyperParameters param_;
+  ScanMatchDiagnostics scan_match_diagnostics_;
+
+  // The last scan that passed the input checks, in base_link.
+  Guarded<pcl::PointCloud<pcl::PointXYZ>::ConstPtr> sensor_points_in_base_link_;
 
   // To prevent deadlocks, acquire locks in the following order:
   // secondary_ndt_ptr_ -> ndt_ptr_

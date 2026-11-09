@@ -19,14 +19,19 @@
 #include <autoware/localization_util/util_func.hpp>
 #include <autoware/ndt_scan_matcher/ndt_omp/estimate_covariance.hpp>
 #include <autoware/ndt_scan_matcher/ndt_scan_matcher.hpp>
+#include <autoware_utils_geometry/geometry.hpp>
 
+#include <pcl/common/transforms.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <iomanip>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -66,6 +71,21 @@ double apply_map_cells(
   const auto duration_micro_sec =
     std::chrono::duration_cast<std::chrono::microseconds>(exe_end_time - exe_start_time).count();
   return static_cast<double>(duration_micro_sec) / 1000.0;
+}
+
+int64_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
+{
+  return static_cast<int64_t>(stamp.sec) * 1000000000LL + static_cast<int64_t>(stamp.nanosec);
+}
+
+// Adds the key values and the level and message of a report to another, as applying both to one
+// DiagnosticsInterface would.
+void append_report(DiagnosticsReport & report, const DiagnosticsReport & other)
+{
+  for (const auto & key_value : other.key_values) {
+    report.add_key_value(key_value);
+  }
+  report.update_level_and_message(other.level, other.message);
 }
 
 std::shared_ptr<NdtScanMatcher::NormalDistributionsTransform> make_empty_ndt(
@@ -142,10 +162,14 @@ CovarianceEstimate estimate_covariance(
 }
 }  // namespace
 
-NdtScanMatcher::NdtScanMatcher(const NdtScanMatcherConfig & config)
-: config_(config),
-  ndt_ptr_(make_empty_ndt(config.ndt)),
-  secondary_ndt_ptr_(make_empty_ndt(config.ndt))
+NdtScanMatcher::NdtScanMatcher(const HyperParameters & param)
+: param_(param),
+  scan_match_diagnostics_(ScanMatchDiagnosticsConfig{
+    param.validation.initial_to_result_distance_tolerance_m,
+    param.validation.critical_upper_bound_exe_time_ms}),
+  sensor_points_in_base_link_(nullptr),
+  ndt_ptr_(make_empty_ndt(param.ndt)),
+  secondary_ndt_ptr_(make_empty_ndt(param.ndt))
 {
 }
 
@@ -202,6 +226,247 @@ std::optional<double> NdtScanMatcher::update_map(const MapUpdateModule::NdtUpdat
   });
 }
 
+ScanMatchOutput NdtScanMatcher::scan_match(
+  const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
+  const ScanMatchInput & input)
+{
+  ScanMatchOutput output = scan_match_main(sensor_points_msg_in_sensor_frame, input);
+
+  // check skipping_publish_num
+  static int64_t skipping_publish_num = 0;
+  skipping_publish_num =
+    ((output.is_succeed || !input.is_activated) ? 0 : (skipping_publish_num + 1));
+  output.diagnostics.add_key_value({"skipping_publish_num", skipping_publish_num});
+  if (skipping_publish_num >= param_.validation.skipping_publish_num) {
+    std::stringstream message;
+    message << "skipping_publish_num exceed limit (" << skipping_publish_num << " times).";
+    output.diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+  }
+
+  return output;
+}
+
+ScanMatchOutput NdtScanMatcher::scan_match_main(
+  const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
+  const ScanMatchInput & input)
+{
+  const auto exe_start_time = std::chrono::system_clock::now();
+
+  ScanMatchOutput output;
+  DiagnosticsReport & diagnostics = output.diagnostics;
+
+  // check topic_time_stamp
+  const builtin_interfaces::msg::Time & sensor_stamp =
+    sensor_points_msg_in_sensor_frame.header.stamp;
+  diagnostics.add_key_value({"topic_time_stamp", to_nanoseconds(sensor_stamp)});
+
+  // check sensor_points_size
+  const size_t sensor_points_size = sensor_points_msg_in_sensor_frame.width;
+  diagnostics.add_key_value({"sensor_points_size", static_cast<int64_t>(sensor_points_size)});
+  if (sensor_points_size == 0) {
+    std::stringstream message;
+    message << "Sensor points is empty.";
+    diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+    return output;
+  }
+
+  // check sensor_points_delay_time_sec
+  const double sensor_points_delay_time_sec =
+    std::chrono::duration<double>(
+      std::chrono::nanoseconds(to_nanoseconds(input.now) - to_nanoseconds(sensor_stamp)))
+      .count();
+  diagnostics.add_key_value({"sensor_points_delay_time_sec", sensor_points_delay_time_sec});
+  if (sensor_points_delay_time_sec > param_.sensor_points.timeout_sec) {
+    std::stringstream message;
+    message << "sensor points is experiencing latency."
+            << "The delay time is " << sensor_points_delay_time_sec << "[sec] "
+            << "(the tolerance is " << param_.sensor_points.timeout_sec << "[sec]).";
+    diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+
+    // If the delay time of the LiDAR topic exceeds the delay compensation time of ekf_localizer,
+    // even if further processing continues, the estimated result will be rejected by ekf_localizer.
+    // Therefore, it would be acceptable to exit the function here.
+    // However, for now, we will continue the processing as it is.
+
+    // return output;
+  }
+
+  // preprocess input pointcloud
+  pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> sensor_points_in_sensor_frame(
+    new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> sensor_points_in_baselink_frame(
+    new pcl::PointCloud<pcl::PointXYZ>);
+  const std::string & sensor_frame = sensor_points_msg_in_sensor_frame.header.frame_id;
+
+  pcl::fromROSMsg(sensor_points_msg_in_sensor_frame, *sensor_points_in_sensor_frame);
+
+  // transform sensor points from sensor-frame to base_link
+  if (!input.sensor_to_base_link) {
+    std::stringstream message;
+    message << input.sensor_to_base_link.error() << ". Please publish TF " << sensor_frame << " to "
+            << param_.frame.base_frame;
+    diagnostics.update_level_and_message(DiagnosticLevel::ERROR, message.str());
+    output.logs.push_back({ScanMatchLog::Kind::TF_LOOKUP_FAILED, message.str()});
+    diagnostics.add_key_value({"is_succeed_transform_sensor_points", false});
+    return output;
+  }
+  if (sensor_frame == param_.frame.base_frame) {
+    sensor_points_in_baselink_frame = sensor_points_in_sensor_frame;
+  } else {
+    pcl::transformPointCloud(
+      *sensor_points_in_sensor_frame, *sensor_points_in_baselink_frame, *input.sensor_to_base_link);
+  }
+  diagnostics.add_key_value({"is_succeed_transform_sensor_points", true});
+
+  // check sensor_points_max_distance
+  double max_distance = 0.0;
+  for (const auto & point : sensor_points_in_baselink_frame->points) {
+    const double distance = std::hypot(point.x, point.y, point.z);
+    max_distance = std::max(max_distance, distance);
+  }
+
+  diagnostics.add_key_value({"sensor_points_max_distance", max_distance});
+  if (max_distance < param_.sensor_points.required_distance) {
+    std::stringstream message;
+    message << "Max distance of sensor points = " << std::fixed << std::setprecision(3)
+            << max_distance << " [m] < " << param_.sensor_points.required_distance << " [m]";
+    diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+    return output;
+  }
+
+  // keep sensor points for the initial pose estimation
+  sensor_points_in_base_link_.with(
+    [&](auto & points) { points = sensor_points_in_baselink_frame; });
+
+  // check is_activated
+  diagnostics.add_key_value({"is_activated", input.is_activated});
+  if (!input.is_activated) {
+    std::stringstream message;
+    message << "Node is not activated.";
+    diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+    return output;
+  }
+
+  // check is_succeed_interpolate_initial_pose
+  const bool is_succeed_interpolate_initial_pose = input.initial_pose.has_value();
+  diagnostics.add_key_value(
+    {"is_succeed_interpolate_initial_pose", is_succeed_interpolate_initial_pose});
+  if (!is_succeed_interpolate_initial_pose) {
+    std::stringstream message;
+    message << "Couldn't interpolate pose. Please verify that "
+               "(1) the initial pose topic (primarily come from the EKF) is being published, and "
+               "(2) the timestamps of the sensor PCD messages and pose messages are synchronized "
+               "correctly.";
+    diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+    return output;
+  }
+
+  output.used_input_poses = true;
+  const InterpolatedPose & interpolation_result = input.initial_pose.value();
+
+  // Warn if the lidar has gone out of the map range
+  const bool is_out_of_map_range = out_of_map_range(
+    interpolation_result.interpolated_pose.pose.pose.position, input.last_map_update_position,
+    param_.dynamic_map_loading);
+  if (is_out_of_map_range) {
+    std::stringstream msg;
+
+    msg << "Lidar has gone out of the map range";
+    diagnostics.update_level_and_message(DiagnosticLevel::WARN, msg.str());
+
+    output.logs.push_back({ScanMatchLog::Kind::OUT_OF_MAP_RANGE, msg.str()});
+  }
+
+  // perform ndt scan matching
+  auto align_result = align(
+    sensor_points_in_baselink_frame, interpolation_result.interpolated_pose.pose.pose,
+    input.regularization_pose);
+
+  // check is_set_map_points (align() fails only with MAP_NOT_SET)
+  const bool is_set_map_points = align_result.has_value();
+  diagnostics.add_key_value({"is_set_map_points", is_set_map_points});
+  if (!is_set_map_points) {
+    std::stringstream message;
+    message << "Map points is not set.";
+    diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+    return output;
+  }
+  NdtScanMatcherResult & result = align_result.value();
+  const pclomp::NdtResult & ndt_result = result.ndt_result;
+
+  ScanMatchDiagnosticValues diagnostic_values;
+  diagnostic_values.iteration_num = ndt_result.iteration_num;
+  diagnostic_values.maximum_iterations = param_.ndt.max_iterations;
+  diagnostic_values.transform_probability = ndt_result.transform_probability;
+  diagnostic_values.nearest_voxel_transformation_likelihood =
+    ndt_result.nearest_voxel_transformation_likelihood;
+  diagnostic_values.transform_probability_array = ndt_result.transform_probability_array;
+  diagnostic_values.nearest_voxel_transformation_likelihood_array =
+    ndt_result.nearest_voxel_transformation_likelihood_array;
+  diagnostic_values.is_ok_iteration_num = result.is_ok_iteration_num;
+  diagnostic_values.oscillation_num = result.oscillation_num;
+  diagnostic_values.is_local_optimal_solution_oscillation =
+    result.is_local_optimal_solution_oscillation;
+
+  // check score
+  if (!result.is_known_converged_param_type) {
+    diagnostic_values.is_known_converged_param_type = false;
+    append_report(diagnostics, scan_match_diagnostics_.make_report(diagnostic_values));
+    return output;
+  }
+
+  if (!result.is_ok_score) {
+    std::stringstream message;
+    message << "Score is below the threshold. Score: " << result.score
+            << ", Threshold: " << result.score_threshold;
+    output.logs.push_back({ScanMatchLog::Kind::SCORE_BELOW_THRESHOLD, message.str()});
+  }
+  diagnostic_values.score = result.score;
+  diagnostic_values.score_threshold = result.score_threshold;
+  diagnostic_values.is_ok_score = result.is_ok_score;
+
+  diagnostic_values.distance_initial_to_result =
+    static_cast<double>(autoware::localization_util::norm(
+      interpolation_result.interpolated_pose.pose.pose.position, result.pose.position));
+
+  const auto exe_end_time = std::chrono::system_clock::now();
+  const auto duration_micro_sec =
+    std::chrono::duration_cast<std::chrono::microseconds>(exe_end_time - exe_start_time).count();
+  const auto exe_time = static_cast<float>(duration_micro_sec) / 1000.0f;
+  diagnostic_values.execution_time_ms = exe_time;
+
+  append_report(diagnostics, scan_match_diagnostics_.make_report(diagnostic_values));
+
+  // Main output: the TF always, the pose only when converged
+  geometry_msgs::msg::PoseStamped result_pose_stamped_msg;
+  result_pose_stamped_msg.header.stamp = sensor_stamp;
+  result_pose_stamped_msg.header.frame_id = param_.frame.map_frame;
+  result_pose_stamped_msg.pose = result.pose;
+  output.tf =
+    autoware_utils_geometry::pose2transform(result_pose_stamped_msg, param_.frame.ndt_base_frame);
+
+  if (result.is_converged) {
+    geometry_msgs::msg::PoseWithCovarianceStamped result_pose_with_cov_msg;
+    result_pose_with_cov_msg.header = result_pose_stamped_msg.header;
+    result_pose_with_cov_msg.pose.pose = result.pose;
+    result_pose_with_cov_msg.pose.covariance = result.covariance;
+    output.ndt_pose = result_pose_stamped_msg;
+    output.ndt_pose_with_covariance = result_pose_with_cov_msg;
+  }
+  output.is_succeed = result.is_converged;
+
+  // Debug output (to be removed after the interface refactoring)
+  pcl::PointCloud<pcl::PointXYZ> sensor_points_in_map;
+  pcl::transformPointCloud(*sensor_points_in_baselink_frame, sensor_points_in_map, ndt_result.pose);
+  NdtScanMatcherDebugScores scores =
+    compute_debug_scores(sensor_points_in_map, result.pose, input.compute_voxel_scores);
+  output.debug = ScanMatchDebug{
+    exe_time, interpolation_result, std::move(result), std::move(sensor_points_in_map),
+    std::move(scores)};
+
+  return output;
+}
+
 tl::expected<NdtScanMatcherResult, NdtScanMatcherError> NdtScanMatcher::align(
   const pcl::PointCloud<pcl::PointXYZ>::ConstPtr & sensor_points_in_base_link,
   const geometry_msgs::msg::Pose & initial_pose,
@@ -240,7 +505,7 @@ tl::expected<NdtScanMatcherResult, NdtScanMatcherError> NdtScanMatcher::align(
       (result.oscillation_num > oscillation_num_threshold);
 
     // check score
-    const auto & score_param = config_.score_estimation;
+    const auto & score_param = param_.score_estimation;
     if (score_param.converged_param_type == ConvergedParamType::TRANSFORM_PROBABILITY) {
       result.score = ndt_result.transform_probability;
       result.score_threshold = score_param.converged_param_transform_probability;
@@ -267,7 +532,7 @@ tl::expected<NdtScanMatcherResult, NdtScanMatcherError> NdtScanMatcher::align(
     const Eigen::Matrix3d map_to_base_link_rotation =
       map_to_base_link_quat.normalized().toRotationMatrix();
 
-    const auto & covariance_param = config_.covariance;
+    const auto & covariance_param = param_.covariance;
     result.covariance =
       rotate_covariance(covariance_param.output_pose_covariance, map_to_base_link_rotation);
     if (
@@ -297,7 +562,7 @@ NdtScanMatcherDebugScores NdtScanMatcher::compute_debug_scores(
   const pcl::PointCloud<pcl::PointXYZ> & sensor_points_in_map,
   const geometry_msgs::msg::Pose & result_pose, const bool compute_voxel_scores)
 {
-  const auto & no_ground_param = config_.score_estimation.no_ground_points;
+  const auto & no_ground_param = param_.score_estimation.no_ground_points;
 
   // remove ground
   std::optional<pcl::PointCloud<pcl::PointXYZ>> no_ground_points_in_map;
@@ -334,10 +599,11 @@ NdtScanMatcherDebugScores NdtScanMatcher::compute_debug_scores(
 }
 
 tl::expected<InitialPoseEstimationResult, NdtScanMatcherError>
-NdtScanMatcher::estimate_initial_pose(
-  const pcl::PointCloud<pcl::PointXYZ>::ConstPtr & sensor_points_in_base_link,
-  const geometry_msgs::msg::PoseWithCovariance & initial_pose)
+NdtScanMatcher::estimate_initial_pose(const geometry_msgs::msg::PoseWithCovariance & initial_pose)
 {
+  const pcl::PointCloud<pcl::PointXYZ>::ConstPtr sensor_points_in_base_link =
+    sensor_points_in_base_link_.with([](const auto & points) { return points; });
+
   return ndt_ptr_.with([&](auto & ndt_ptr) -> InitialPoseResult {
     if (!ndt_ptr->hasTarget()) {
       return tl::unexpected(NdtScanMatcherError::MAP_NOT_SET);
@@ -368,12 +634,13 @@ NdtScanMatcher::estimate_initial_pose(
       stddev_x, stddev_y, stddev_z, stddev_roll, stddev_pitch};
 
     // Optimizing (x, y, z, roll, pitch, yaw) 6 dimensions.
-    const auto & param = config_.initial_pose_estimation;
+    const auto & param = param_.initial_pose_estimation;
     TreeStructuredParzenEstimator tpe(
       TreeStructuredParzenEstimator::Direction::MAXIMIZE, param.n_startup_trials, sample_mean,
       sample_stddev);
 
     InitialPoseEstimationResult result;
+    result.debug.sensor_points_in_base_link = sensor_points_in_base_link;
     std::vector<Particle> & particle_array = result.debug.particles;
     auto output_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 

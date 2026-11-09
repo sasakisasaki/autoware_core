@@ -543,7 +543,7 @@ std::vector<rclcpp::Parameter> converged_hot_path_overrides(
     rclcpp::Parameter("dynamic_map_loading.map_radius", 150.0),
     rclcpp::Parameter("dynamic_map_loading.lidar_radius", 100.0),
     rclcpp::Parameter("dynamic_map_loading.update_distance", 20.0),
-    // Regularization would add `interpolate_regularization_pose` to this path, interpolate a buffer
+    // Regularization would add the regularization pose interpolation to this path, read a buffer
     // nothing here fills, and create a sixth `/diagnostics` publisher the readiness check misses.
     rclcpp::Parameter("ndt.regularization.enable", false),
   };
