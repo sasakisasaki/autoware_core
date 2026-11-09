@@ -14,13 +14,17 @@
 
 #include "ndt_scan_matcher_helper.hpp"
 
+#include <autoware/localization_util/matrix_type.hpp>
+#include <autoware/localization_util/tree_structured_parzen_estimator.hpp>
 #include <autoware/localization_util/util_func.hpp>
 #include <autoware/ndt_scan_matcher/ndt_omp/estimate_covariance.hpp>
 #include <autoware/ndt_scan_matcher/ndt_scan_matcher.hpp>
 
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -32,10 +36,12 @@ namespace autoware::ndt_scan_matcher
 {
 using autoware::localization_util::matrix4f_to_pose;
 using autoware::localization_util::pose_to_matrix4f;
+using autoware::localization_util::TreeStructuredParzenEstimator;
 
 namespace
 {
 using AlignResult = tl::expected<NdtScanMatcherResult, NdtScanMatcherError>;
+using InitialPoseResult = tl::expected<InitialPoseEstimationResult, NdtScanMatcherError>;
 
 // Adds and removes the given map cells on the NDT. Returns the time it took in milliseconds.
 double apply_map_cells(
@@ -325,6 +331,101 @@ NdtScanMatcherDebugScores NdtScanMatcher::compute_debug_scores(
     }
     return scores;
   });
+}
+
+tl::expected<InitialPoseEstimationResult, NdtScanMatcherError>
+NdtScanMatcher::estimate_initial_pose(
+  const pcl::PointCloud<pcl::PointXYZ>::ConstPtr & sensor_points_in_base_link,
+  const geometry_msgs::msg::PoseWithCovariance & initial_pose)
+{
+  return ndt_ptr_.with([&](auto & ndt_ptr) -> InitialPoseResult {
+    if (!ndt_ptr->hasTarget()) {
+      return tl::unexpected(NdtScanMatcherError::MAP_NOT_SET);
+    }
+    if (!sensor_points_in_base_link) {
+      return tl::unexpected(NdtScanMatcherError::SENSOR_POINTS_NOT_SET);
+    }
+
+    const auto base_rpy = autoware::localization_util::get_rpy(initial_pose.pose);
+    const Eigen::Map<const autoware::localization_util::RowMatrixXd> covariance = {
+      initial_pose.covariance.data(), 6, 6};
+    const double stddev_x = std::sqrt(covariance(0, 0));
+    const double stddev_y = std::sqrt(covariance(1, 1));
+    const double stddev_z = std::sqrt(covariance(2, 2));
+    const double stddev_roll = std::sqrt(covariance(3, 3));
+    const double stddev_pitch = std::sqrt(covariance(4, 4));
+
+    // Since only yaw is uniformly sampled, we define the mean and standard deviation for the
+    // others.
+    const std::vector<double> sample_mean{
+      initial_pose.pose.position.x,  // trans_x
+      initial_pose.pose.position.y,  // trans_y
+      initial_pose.pose.position.z,  // trans_z
+      base_rpy.x,                    // angle_x
+      base_rpy.y                     // angle_y
+    };
+    const std::vector<double> sample_stddev{
+      stddev_x, stddev_y, stddev_z, stddev_roll, stddev_pitch};
+
+    // Optimizing (x, y, z, roll, pitch, yaw) 6 dimensions.
+    const auto & param = config_.initial_pose_estimation;
+    TreeStructuredParzenEstimator tpe(
+      TreeStructuredParzenEstimator::Direction::MAXIMIZE, param.n_startup_trials, sample_mean,
+      sample_stddev);
+
+    InitialPoseEstimationResult result;
+    std::vector<Particle> & particle_array = result.debug.particles;
+    auto output_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+
+    for (int64_t i = 0; i < param.particles_num; i++) {
+      const TreeStructuredParzenEstimator::Input input = tpe.get_next_input();
+
+      geometry_msgs::msg::Pose particle_initial_pose;
+      particle_initial_pose.position.x = input[0];
+      particle_initial_pose.position.y = input[1];
+      particle_initial_pose.position.z = input[2];
+      geometry_msgs::msg::Vector3 init_rpy;
+      init_rpy.x = input[3];
+      init_rpy.y = input[4];
+      init_rpy.z = input[5];
+      tf2::Quaternion tf_quaternion;
+      tf_quaternion.setRPY(init_rpy.x, init_rpy.y, init_rpy.z);
+      particle_initial_pose.orientation = tf2::toMsg(tf_quaternion);
+
+      const Eigen::Matrix4f initial_pose_matrix = pose_to_matrix4f(particle_initial_pose);
+      ndt_ptr->align(*output_cloud, initial_pose_matrix, sensor_points_in_base_link);
+      const pclomp::NdtResult ndt_result = ndt_ptr->getResult();
+
+      const geometry_msgs::msg::Pose pose = matrix4f_to_pose(ndt_result.pose);
+      particle_array.emplace_back(
+        particle_initial_pose, pose, ndt_result.nearest_voxel_transformation_likelihood,
+        ndt_result.iteration_num);
+
+      const geometry_msgs::msg::Vector3 rpy = autoware::localization_util::get_rpy(pose);
+
+      TreeStructuredParzenEstimator::Input trial_result(6);
+      trial_result[0] = pose.position.x;
+      trial_result[1] = pose.position.y;
+      trial_result[2] = pose.position.z;
+      trial_result[3] = rpy.x;
+      trial_result[4] = rpy.y;
+      trial_result[5] = rpy.z;
+      tpe.add_trial(
+        TreeStructuredParzenEstimator::Trial{trial_result, ndt_result.transform_probability});
+    }
+
+    auto best_particle_ptr = std::max_element(
+      std::begin(particle_array), std::end(particle_array),
+      [](const Particle & lhs, const Particle & rhs) { return lhs.score < rhs.score; });
+    result.pose = best_particle_ptr->result_pose;
+    result.score = best_particle_ptr->score;
+    return result;
+  });
+}
+
+std::vector<std::string> NdtScanMatcher::map_ids()
+{
+  return ndt_ptr_.with([](const auto & ndt_ptr) { return ndt_ptr->getCurrentMapIDs(); });
 }
 
 }  // namespace autoware::ndt_scan_matcher

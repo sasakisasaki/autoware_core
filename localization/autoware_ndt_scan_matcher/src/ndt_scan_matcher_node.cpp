@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <autoware/localization_util/matrix_type.hpp>
-#include <autoware/localization_util/tree_structured_parzen_estimator.hpp>
 #include <autoware/localization_util/util_func.hpp>
 #include <autoware/ndt_scan_matcher/ndt_scan_matcher_node.hpp>
 #include <autoware/ndt_scan_matcher/particle.hpp>
@@ -52,7 +50,6 @@ using autoware::localization_util::matrix4f_to_pose;
 using autoware::localization_util::pose_to_matrix4f;
 
 using autoware::localization_util::SmartPoseBuffer;
-using autoware::localization_util::TreeStructuredParzenEstimator;
 
 autoware_internal_debug_msgs::msg::Float32Stamped make_float32_stamped(
   const builtin_interfaces::msg::Time & stamp, const float data)
@@ -184,8 +181,8 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
       std::placeholders::_2),
     service_qos, sensor_callback_group);
 
-  ndt_scan_matcher_ = std::make_unique<NdtScanMatcher>(
-    NdtScanMatcherConfig{param_.ndt, param_.score_estimation, param_.covariance});
+  ndt_scan_matcher_ = std::make_unique<NdtScanMatcher>(NdtScanMatcherConfig{
+    param_.ndt, param_.score_estimation, param_.covariance, param_.initial_pose_estimation});
 
   initial_pose_buffer_ = std::make_unique<SmartPoseBuffer>(
     this->get_logger(), param_.validation.initial_pose_timeout_sec,
@@ -565,7 +562,7 @@ bool NdtScanMatcherNode::callback_sensor_points_main(
     sensor_points_in_baselink_frame, interpolation_result.interpolated_pose.pose.pose,
     regularization_pose);
 
-  // check is_set_map_points (MAP_NOT_SET is the only error of align())
+  // check is_set_map_points (align() fails only with MAP_NOT_SET)
   const bool is_set_map_points = align_result.has_value();
   diagnostics_scan_points_->add_key_value("is_set_map_points", is_set_map_points);
   if (!is_set_map_points) {
@@ -960,153 +957,95 @@ void NdtScanMatcherNode::service_ndt_align_main(
 
   publish_loaded_map_if_present(result, this->now());
 
-  ndt_scan_matcher_->with_ndt([&](const auto & ndt_ptr) {
-    // check is_set_map_points
-    bool is_set_map_points = ndt_ptr->hasTarget();
-    diagnostics_ndt_align_->add_key_value("is_set_map_points", is_set_map_points);
-    if (!is_set_map_points) {
-      std::stringstream message;
-      message << "No InputTarget. Please check the map file and the map_loader service";
-      diagnostics_ndt_align_->update_level_and_message(
-        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
-      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
-      res->success = false;
-      return;
-    }
+  // estimate initial pose
+  const auto estimation_result = ndt_scan_matcher_->estimate_initial_pose(
+    sensor_points_in_baselink_frame_, initial_pose_msg_in_map_frame.pose);
 
-    // check is_set_sensor_points
-    bool is_set_sensor_points = (sensor_points_in_baselink_frame_ != nullptr);
-    diagnostics_ndt_align_->add_key_value("is_set_sensor_points", is_set_sensor_points);
-    if (!is_set_sensor_points) {
-      std::stringstream message;
-      message << "No InputSource. Please check the input lidar topic";
-      diagnostics_ndt_align_->update_level_and_message(
-        diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
-      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
-      res->success = false;
-      return;
-    }
+  // check is_set_map_points
+  const bool is_set_map_points =
+    estimation_result.has_value() || estimation_result.error() != NdtScanMatcherError::MAP_NOT_SET;
+  diagnostics_ndt_align_->add_key_value("is_set_map_points", is_set_map_points);
+  if (!is_set_map_points) {
+    std::stringstream message;
+    message << "No InputTarget. Please check the map file and the map_loader service";
+    diagnostics_ndt_align_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
+    res->success = false;
+    return;
+  }
 
-    // estimate initial pose
-    const auto [pose_with_covariance, score] = align_pose(initial_pose_msg_in_map_frame, *ndt_ptr);
-    diagnostics_ndt_align_->add_key_value("best_particle_score", score);
+  // check is_set_sensor_points
+  const bool is_set_sensor_points =
+    estimation_result.has_value() ||
+    estimation_result.error() != NdtScanMatcherError::SENSOR_POINTS_NOT_SET;
+  diagnostics_ndt_align_->add_key_value("is_set_sensor_points", is_set_sensor_points);
+  if (!is_set_sensor_points) {
+    std::stringstream message;
+    message << "No InputSource. Please check the input lidar topic";
+    diagnostics_ndt_align_->update_level_and_message(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN, message.str());
+    RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, message.str());
+    res->success = false;
+    return;
+  }
+  const InitialPoseEstimationResult & estimation = estimation_result.value();
 
-    // check reliability of initial pose result
-    res->reliable =
-      (param_.score_estimation.converged_param_nearest_voxel_transformation_likelihood < score);
-    if (!res->reliable) {
-      RCLCPP_WARN_STREAM(
-        this->get_logger(), "Initial Pose Estimation is Unstable. Score is " << score);
-    }
-    res->success = true;
-    res->pose_with_covariance = pose_with_covariance;
-    res->pose_with_covariance.pose.covariance = req->pose_with_covariance.pose.covariance;
-  });
+  geometry_msgs::msg::PoseWithCovarianceStamped pose_with_covariance;
+  pose_with_covariance.header.stamp = initial_pose_msg_in_map_frame.header.stamp;
+  pose_with_covariance.header.frame_id = param_.frame.map_frame;
+  pose_with_covariance.pose.pose = estimation.pose;
+
+  autoware::localization_util::output_pose_with_cov_to_log(
+    get_logger(), "align_pose_input", initial_pose_msg_in_map_frame);
+  autoware::localization_util::output_pose_with_cov_to_log(
+    get_logger(), "align_pose_output", pose_with_covariance);
+
+  const double score = estimation.score;
+  diagnostics_ndt_align_->add_key_value("best_particle_score", score);
+
+  // check reliability of initial pose result
+  res->reliable =
+    (param_.score_estimation.converged_param_nearest_voxel_transformation_likelihood < score);
+  if (!res->reliable) {
+    RCLCPP_WARN_STREAM(
+      this->get_logger(), "Initial Pose Estimation is Unstable. Score is " << score);
+  }
+  res->success = true;
+  res->pose_with_covariance = pose_with_covariance;
+  res->pose_with_covariance.pose.covariance = req->pose_with_covariance.pose.covariance;
+
+  // Debug output (to be removed after the interface refactoring)
+  publish_initial_pose_estimation_debug(
+    initial_pose_msg_in_map_frame.header.stamp, *sensor_points_in_baselink_frame_,
+    estimation.debug.particles);
 }
 
-std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> NdtScanMatcherNode::align_pose(
-  const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_with_cov,
-  NormalDistributionsTransform & ndt_ref)
+void NdtScanMatcherNode::publish_initial_pose_estimation_debug(
+  const rclcpp::Time & stamp, const pcl::PointCloud<PointSource> & sensor_points_in_baselink_frame,
+  const std::vector<Particle> & particles)
 {
-  autoware::localization_util::output_pose_with_cov_to_log(
-    get_logger(), "align_pose_input", initial_pose_with_cov);
-
-  const auto base_rpy = autoware::localization_util::get_rpy(initial_pose_with_cov);
-  const Eigen::Map<const autoware::localization_util::RowMatrixXd> covariance = {
-    initial_pose_with_cov.pose.covariance.data(), 6, 6};
-  const double stddev_x = std::sqrt(covariance(0, 0));
-  const double stddev_y = std::sqrt(covariance(1, 1));
-  const double stddev_z = std::sqrt(covariance(2, 2));
-  const double stddev_roll = std::sqrt(covariance(3, 3));
-  const double stddev_pitch = std::sqrt(covariance(4, 4));
-
-  // Since only yaw is uniformly sampled, we define the mean and standard deviation for the others.
-  const std::vector<double> sample_mean{
-    initial_pose_with_cov.pose.pose.position.x,  // trans_x
-    initial_pose_with_cov.pose.pose.position.y,  // trans_y
-    initial_pose_with_cov.pose.pose.position.z,  // trans_z
-    base_rpy.x,                                  // angle_x
-    base_rpy.y                                   // angle_y
-  };
-  const std::vector<double> sample_stddev{stddev_x, stddev_y, stddev_z, stddev_roll, stddev_pitch};
-
-  // Optimizing (x, y, z, roll, pitch, yaw) 6 dimensions.
-  TreeStructuredParzenEstimator tpe(
-    TreeStructuredParzenEstimator::Direction::MAXIMIZE,
-    param_.initial_pose_estimation.n_startup_trials, sample_mean, sample_stddev);
-
-  std::vector<Particle> particle_array;
-  auto output_cloud = std::make_shared<pcl::PointCloud<PointSource>>();
-
   // publish the estimated poses in 20 times to see the progress and to avoid dropping data
   visualization_msgs::msg::MarkerArray marker_array;
   constexpr int64_t publish_num = 20;
-  const int64_t publish_interval =
-    std::max<int64_t>(param_.initial_pose_estimation.particles_num / publish_num, 1);
+  const auto particles_num = static_cast<int64_t>(particles.size());
+  const int64_t publish_interval = std::max<int64_t>(particles_num / publish_num, 1);
 
-  for (int64_t i = 0; i < param_.initial_pose_estimation.particles_num; i++) {
-    const TreeStructuredParzenEstimator::Input input = tpe.get_next_input();
-
-    geometry_msgs::msg::Pose initial_pose;
-    initial_pose.position.x = input[0];
-    initial_pose.position.y = input[1];
-    initial_pose.position.z = input[2];
-    geometry_msgs::msg::Vector3 init_rpy;
-    init_rpy.x = input[3];
-    init_rpy.y = input[4];
-    init_rpy.z = input[5];
-    tf2::Quaternion tf_quaternion;
-    tf_quaternion.setRPY(init_rpy.x, init_rpy.y, init_rpy.z);
-    initial_pose.orientation = tf2::toMsg(tf_quaternion);
-
-    const Eigen::Matrix4f initial_pose_matrix = pose_to_matrix4f(initial_pose);
-    ndt_ref.align(*output_cloud, initial_pose_matrix, sensor_points_in_baselink_frame_);
-    const pclomp::NdtResult ndt_result = ndt_ref.getResult();
-
-    Particle particle(
-      initial_pose, matrix4f_to_pose(ndt_result.pose),
-      ndt_result.nearest_voxel_transformation_likelihood, ndt_result.iteration_num);
-    particle_array.push_back(particle);
+  for (int64_t i = 0; i < particles_num; i++) {
+    const Particle & particle = particles[i];
     push_debug_markers(marker_array, get_clock()->now(), param_.frame.map_frame, particle, i);
 
-    if (
-      (i + 1) % publish_interval == 0 || (i + 1) == param_.initial_pose_estimation.particles_num) {
+    if ((i + 1) % publish_interval == 0 || (i + 1) == particles_num) {
       ndt_monte_carlo_initial_pose_marker_pub_->publish(marker_array);
       marker_array.markers.clear();
     }
 
-    const geometry_msgs::msg::Pose pose = matrix4f_to_pose(ndt_result.pose);
-    const geometry_msgs::msg::Vector3 rpy = autoware::localization_util::get_rpy(pose);
-
-    TreeStructuredParzenEstimator::Input result(6);
-    result[0] = pose.position.x;
-    result[1] = pose.position.y;
-    result[2] = pose.position.z;
-    result[3] = rpy.x;
-    result[4] = rpy.y;
-    result[5] = rpy.z;
-    tpe.add_trial(TreeStructuredParzenEstimator::Trial{result, ndt_result.transform_probability});
-
     auto sensor_points_in_map_ptr = std::make_shared<pcl::PointCloud<PointSource>>();
     autoware_utils_pcl::transform_pointcloud(
-      *sensor_points_in_baselink_frame_, *sensor_points_in_map_ptr, ndt_result.pose);
-    publish_point_cloud(
-      initial_pose_with_cov.header.stamp, param_.frame.map_frame, sensor_points_in_map_ptr);
+      sensor_points_in_baselink_frame, *sensor_points_in_map_ptr,
+      pose_to_matrix4f(particle.result_pose));
+    publish_point_cloud(stamp, param_.frame.map_frame, sensor_points_in_map_ptr);
   }
-
-  auto best_particle_ptr = std::max_element(
-    std::begin(particle_array), std::end(particle_array),
-    [](const Particle & lhs, const Particle & rhs) { return lhs.score < rhs.score; });
-
-  geometry_msgs::msg::PoseWithCovarianceStamped result_pose_with_cov_msg;
-  result_pose_with_cov_msg.header.stamp = initial_pose_with_cov.header.stamp;
-  result_pose_with_cov_msg.header.frame_id = param_.frame.map_frame;
-  result_pose_with_cov_msg.pose.pose = best_particle_ptr->result_pose;
-
-  autoware::localization_util::output_pose_with_cov_to_log(
-    get_logger(), "align_pose_output", result_pose_with_cov_msg);
-
-  return std::make_tuple(result_pose_with_cov_msg, best_particle_ptr->score);
 }
 
 }  // namespace autoware::ndt_scan_matcher
