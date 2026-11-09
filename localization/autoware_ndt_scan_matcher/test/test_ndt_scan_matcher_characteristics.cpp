@@ -590,7 +590,7 @@ TEST(NdtScanMatcherCharacteristics, UnknownConvergedParamTypeIsErrorAfterAlignin
 }
 
 /// Looks like a bug — a non-converged scan withholds the pose but still broadcasts the TF: the
-/// convergence gate sits inside `publish_pose`, and `publish_tf` has none. Both repairs harm.
+/// convergence gate applies to the pose outputs only, and the TF has none. Both repairs harm.
 TEST(NdtScanMatcherCharacteristics, NonConvergedScanSuppressesPoseButStillBroadcastsTf)
 {
   // Arrange
@@ -623,8 +623,8 @@ TEST(NdtScanMatcherCharacteristics, NonConvergedScanSuppressesPoseButStillBroadc
   EXPECT_TRUE(contains(diag.message(), "Score is below the threshold. Score: "))
     << "message was: " << diag.message();
 
-  // `points_aligned` is the last unconditional publish, so it proves the callback passed
-  // `publish_pose`.
+  // `points_aligned` is published after the pose outputs, so it proves the callback passed
+  // them.
   ASSERT_TRUE(
     harness->wait_until([&] { return points_aligned->count() >= 1 && tf->count() >= 1; }, 5s));
 

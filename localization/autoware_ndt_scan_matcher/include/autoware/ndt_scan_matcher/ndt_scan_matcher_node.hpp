@@ -37,7 +37,9 @@
 #include <autoware_internal_localization_msgs/srv/pose_with_covariance_stamped.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -59,6 +61,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -92,11 +95,26 @@ private:
     std::string message;
   };
 
+  // What the debug outputs of a scan matching are made from.
+  struct ScanMatchDebug
+  {
+    float exe_time;
+    autoware::localization_util::SmartPoseBuffer::InterpolateResult interpolation_result;
+    NdtScanMatcherResult result;
+    pcl::PointCloud<PointSource> sensor_points_in_map;
+    NdtScanMatcherDebugScores scores;
+  };
+
+  // Everything a scan matching produces, for the node to log and publish.
   struct ScanMatchOutput
   {
-    bool is_succeed{false};  // whether a converged pose was published
-    DiagnosticsReport diagnostics;
+    bool is_succeed{false};         // whether the pose converged
+    DiagnosticsReport diagnostics;  // complete, ready to publish
     std::vector<ScanMatchLog> logs;
+    std::optional<geometry_msgs::msg::TransformStamped> tf;
+    std::optional<geometry_msgs::msg::PoseStamped> ndt_pose;
+    std::optional<geometry_msgs::msg::PoseWithCovarianceStamped> ndt_pose_with_covariance;
+    std::optional<ScanMatchDebug> debug;
   };
 
   void callback_timer();
@@ -115,9 +133,23 @@ private:
   void callback_sensor_points(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
     sensor_points_msg_in_sensor_frame);
-  ScanMatchOutput callback_sensor_points_main(
-    const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
-    sensor_points_msg_in_sensor_frame);
+  // The scan matching of one scan, without the ROS runtime: the current time, the sensor to
+  // base_link transform and whether the voxel scores are wanted come in as inputs, and the
+  // diagnostics, logs and messages to publish go out in the output.
+  ScanMatchOutput scan_match(
+    const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
+    const rclcpp::Time & now,
+    const tl::expected<Eigen::Matrix4f, std::string> & sensor_to_base_link,
+    bool compute_voxel_scores);
+  // scan_match() up to the result of this scan; scan_match() adds the check over successive scans.
+  ScanMatchOutput scan_match_main(
+    const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
+    const rclcpp::Time & now,
+    const tl::expected<Eigen::Matrix4f, std::string> & sensor_to_base_link,
+    bool compute_voxel_scores);
+  // Returns the error text of the TF lookup on failure.
+  tl::expected<Eigen::Matrix4f, std::string> lookup_sensor_to_base_link(
+    const std::string & sensor_frame);
   void write_logs(const std::vector<ScanMatchLog> & logs);
 
   void service_trigger_node(
@@ -139,29 +171,15 @@ private:
     const pcl::PointCloud<PointSource> & sensor_points_in_baselink_frame,
     const std::vector<Particle> & particles);
 
-  void transform_sensor_measurement(
-    const std::string & source_frame, const std::string & target_frame,
-    const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_input_ptr,
-    pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_output_ptr);
-
-  void publish_tf(
-    const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg);
-  void publish_pose(
-    const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
-    const std::array<double, 36> & ndt_covariance, const bool is_converged);
   void publish_point_cloud(
     const rclcpp::Time & sensor_ros_time, const std::string & frame_id,
-    const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr);
+    const pcl::PointCloud<PointSource> & sensor_points_in_map);
   void publish_marker(
     const rclcpp::Time & sensor_ros_time, const std::vector<geometry_msgs::msg::Pose> & pose_array);
   void publish_multi_ndt_poses(
     const rclcpp::Time & sensor_ros_time, const NdtScanMatcherResult::Debug & debug);
   // Publishes every debug output of a scan matching. Each one keeps its own condition.
-  void publish_debug(
-    const rclcpp::Time & sensor_ros_time, const float exe_time,
-    const autoware::localization_util::SmartPoseBuffer::InterpolateResult & interpolation_result,
-    const pcl::PointCloud<PointSource> & sensor_points_in_baselink_frame,
-    const NdtScanMatcherResult & result);
+  void publish_debug(const rclcpp::Time & sensor_ros_time, const ScanMatchDebug & debug);
   void publish_initial_to_result(
     const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
     const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
