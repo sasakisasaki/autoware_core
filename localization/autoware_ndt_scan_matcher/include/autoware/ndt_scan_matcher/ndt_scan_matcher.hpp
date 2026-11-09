@@ -21,10 +21,10 @@
 #include "map_update_module.hpp"
 #include "ndt_omp/multigrid_ndt_omp.h"
 #include "particle.hpp"
+#include "pose_buffer.hpp"
 #include "scan_match_diagnostics.hpp"
 
 #include <Eigen/Core>
-#include <autoware/localization_util/smart_pose_buffer.hpp>
 #include <builtin_interfaces/msg/time.hpp>
 #include <tl_expected/expected.hpp>
 
@@ -113,7 +113,7 @@ struct InitialPoseEstimationResult
   } debug;
 };
 
-using InterpolatedPose = autoware::localization_util::SmartPoseBuffer::InterpolateResult;
+using InterpolatedPose = PoseBuffer::InterpolateResult;
 
 // What scan_match() takes from the ROS runtime and from the rest of the node.
 struct ScanMatchInput
@@ -122,19 +122,22 @@ struct ScanMatchInput
   // The sensor to base_link transform, or the error text of its TF lookup.
   tl::expected<Eigen::Matrix4f, std::string> sensor_to_base_link;
   bool is_activated{false};
-  // The initial pose interpolated to the scan time, if it could be.
-  std::optional<InterpolatedPose> initial_pose;
-  // The regularization pose interpolated to the scan time, when regularization is enabled and it
-  // could be.
-  std::optional<geometry_msgs::msg::Pose> regularization_pose;
   std::optional<geometry_msgs::msg::Point> last_map_update_position;
   bool compute_voxel_scores{false};
 };
 
-// A log line of the scan matching, for the node to write with a throttle per kind.
+// A log line of the scan matching, for the node to write. The POSE_BUFFER kinds are the reasons an
+// input pose could not be interpolated, written without a throttle; the others are throttled per
+// kind.
 struct ScanMatchLog
 {
-  enum class Kind { TF_LOOKUP_FAILED, OUT_OF_MAP_RANGE, SCORE_BELOW_THRESHOLD };
+  enum class Kind {
+    TF_LOOKUP_FAILED,
+    OUT_OF_MAP_RANGE,
+    SCORE_BELOW_THRESHOLD,
+    POSE_BUFFER_INFO,
+    POSE_BUFFER_WARN
+  };
   Kind kind;
   std::string message;
 };
@@ -152,10 +155,7 @@ struct ScanMatchDebug
 // Everything a scan matching produces, for the node to log and publish.
 struct ScanMatchOutput
 {
-  bool is_succeed{false};  // whether the pose converged
-  // Whether the scan got as far as using the input poses, so the node removes the poses older
-  // than the scan from its buffers.
-  bool used_input_poses{false};
+  bool is_succeed{false};         // whether the pose converged
   DiagnosticsReport diagnostics;  // complete, ready to publish
   std::vector<ScanMatchLog> logs;
   std::optional<geometry_msgs::msg::TransformStamped> tf;
@@ -176,13 +176,25 @@ public:
 
   explicit NdtScanMatcher(const HyperParameters & param);
 
+  // Keeps a pose of the vehicle (primarily from the EKF) to start the scan matching from. A scan
+  // aligns from the poses interpolated to its time, and drops the poses older than it.
+  void add_initial_pose(const geometry_msgs::msg::PoseWithCovarianceStamped & pose);
+
+  // Drops the kept initial poses, so that no scan aligns from a pose received before.
+  void clear_initial_poses();
+
+  // Keeps a pose to pull the alignment towards, used when ndt_regularization_enable. A scan uses
+  // the pose interpolated to its time, and drops the poses older than it.
+  void add_regularization_pose(const geometry_msgs::msg::PoseWithCovarianceStamped & pose);
+
   // Applies a map update fetched by MapUpdateModule. A rebuild clears the map and holds scan
   // matching until the new map is built. Returns the time spent building the map in milliseconds,
   // or nullopt when a rebuild had no cells and left the map empty.
   std::optional<double> update_map(const MapUpdateModule::NdtUpdate & update);
 
-  // Checks the scan, aligns it from the initial pose and reports the result as diagnostics, logs
-  // and messages to publish. A scan passing the input checks is kept for estimate_initial_pose().
+  // Checks the scan, aligns it from the initial pose interpolated to its time and reports the
+  // result as diagnostics, logs and messages to publish. A scan passing the input checks is kept
+  // for estimate_initial_pose().
   ScanMatchOutput scan_match(
     const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
     const ScanMatchInput & input);
@@ -214,6 +226,9 @@ private:
 
   HyperParameters param_;
   ScanMatchDiagnostics scan_match_diagnostics_;
+
+  Guarded<PoseBuffer> initial_pose_buffer_;
+  Guarded<PoseBuffer> regularization_pose_buffer_;
 
   // The last scan that passed the input checks, in base_link.
   Guarded<pcl::PointCloud<pcl::PointXYZ>::ConstPtr> sensor_points_in_base_link_;

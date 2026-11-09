@@ -49,8 +49,6 @@ using autoware::localization_util::exchange_color_crc;
 using autoware::localization_util::matrix4f_to_pose;
 using autoware::localization_util::pose_to_matrix4f;
 
-using autoware::localization_util::SmartPoseBuffer;
-
 autoware_internal_debug_msgs::msg::Float32Stamped make_float32_stamped(
   const builtin_interfaces::msg::Time & stamp, const float data)
 {
@@ -111,9 +109,6 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
         "regularization_pose_with_covariance", 10,
         std::bind(&NdtScanMatcherNode::callback_regularization_pose, this, std::placeholders::_1),
         initial_pose_sub_opt);
-    const double value_as_unlimited = 1000.0;
-    regularization_pose_buffer_ =
-      std::make_unique<SmartPoseBuffer>(this->get_logger(), value_as_unlimited, value_as_unlimited);
 
     diagnostics_regularization_pose_ =
       std::make_unique<DiagnosticsInterface>(this, "regularization_pose_subscriber_status");
@@ -182,10 +177,6 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
     service_qos, sensor_callback_group);
 
   ndt_scan_matcher_ = std::make_unique<NdtScanMatcher>(param_);
-
-  initial_pose_buffer_ = std::make_unique<SmartPoseBuffer>(
-    this->get_logger(), param_.validation.initial_pose_timeout_sec,
-    param_.validation.initial_pose_distance_tolerance_m);
 
   // ROS-dependent resources for the map update module are owned by this node.
   loaded_pcd_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -361,8 +352,7 @@ void NdtScanMatcherNode::callback_initial_pose_main(
     return;
   }
 
-  initial_pose_buffer_->push_back(
-    std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(*initial_pose_msg_ptr));
+  ndt_scan_matcher_->add_initial_pose(*initial_pose_msg_ptr);
 
   latest_ekf_position_.with([&](auto & pos) { pos = initial_pose_msg_ptr->pose.pose.position; });
 }
@@ -376,8 +366,7 @@ void NdtScanMatcherNode::callback_regularization_pose(
   diagnostics_regularization_pose_->add_key_value(
     "topic_time_stamp", static_cast<rclcpp::Time>(pose_conv_msg_ptr->header.stamp).nanoseconds());
 
-  regularization_pose_buffer_->push_back(
-    std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(*pose_conv_msg_ptr));
+  ndt_scan_matcher_->add_regularization_pose(*pose_conv_msg_ptr);
 
   diagnostics_regularization_pose_->publish(pose_conv_msg_ptr->header.stamp);
 }
@@ -386,24 +375,11 @@ void NdtScanMatcherNode::callback_sensor_points(
   const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
   sensor_points_msg_in_sensor_frame)
 {
-  const rclcpp::Time sensor_ros_time = sensor_points_msg_in_sensor_frame->header.stamp;
-
   ScanMatchInput input;
   input.now = this->now();
   input.sensor_to_base_link =
     lookup_sensor_to_base_link(sensor_points_msg_in_sensor_frame->header.frame_id);
   input.is_activated = is_activated_;
-  // The poses are interpolated to the scan time here, and removed from their buffers below only if
-  // the scan matching used them.
-  input.initial_pose = initial_pose_buffer_->interpolate(sensor_ros_time);
-  bool has_regularization_pose = false;
-  if (param_.ndt_regularization_enable) {
-    const auto regularization_pose = regularization_pose_buffer_->interpolate(sensor_ros_time);
-    if (regularization_pose) {
-      input.regularization_pose = regularization_pose->interpolated_pose.pose.pose;
-      has_regularization_pose = true;
-    }
-  }
   input.last_map_update_position =
     last_map_update_position_.with([](const auto & pos) { return pos; });
   input.compute_voxel_scores = voxel_score_points_pub_->get_subscription_count() > 0;
@@ -411,13 +387,6 @@ void NdtScanMatcherNode::callback_sensor_points(
   // scan matching
   const ScanMatchOutput output =
     ndt_scan_matcher_->scan_match(*sensor_points_msg_in_sensor_frame, input);
-
-  if (output.used_input_poses) {
-    initial_pose_buffer_->pop_old(sensor_ros_time);
-    if (has_regularization_pose) {
-      regularization_pose_buffer_->pop_old(sensor_ros_time);
-    }
-  }
 
   write_logs(output.logs);
 
@@ -456,6 +425,12 @@ void NdtScanMatcherNode::write_logs(const std::vector<ScanMatchLog> & logs)
       case ScanMatchLog::Kind::SCORE_BELOW_THRESHOLD:
         RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, log.message);
         break;
+      case ScanMatchLog::Kind::POSE_BUFFER_INFO:
+        RCLCPP_INFO_STREAM(this->get_logger(), log.message);
+        break;
+      case ScanMatchLog::Kind::POSE_BUFFER_WARN:
+        RCLCPP_WARN_STREAM(this->get_logger(), log.message);
+        break;
     }
   }
 }
@@ -481,7 +456,7 @@ tl::expected<Eigen::Matrix4f, std::string> NdtScanMatcherNode::lookup_sensor_to_
 void NdtScanMatcherNode::publish_debug(
   const rclcpp::Time & sensor_ros_time, const ScanMatchDebug & debug)
 {
-  const SmartPoseBuffer::InterpolateResult & interpolation_result = debug.interpolation_result;
+  const InterpolatedPose & interpolation_result = debug.interpolation_result;
   const NdtScanMatcherResult & result = debug.result;
   const pclomp::NdtResult & ndt_result = result.ndt_result;
   const NdtScanMatcherDebugScores & scores = debug.scores;
@@ -656,7 +631,7 @@ void NdtScanMatcherNode::service_trigger_node(
 
   is_activated_ = req->data;
   if (is_activated_) {
-    initial_pose_buffer_->clear();
+    ndt_scan_matcher_->clear_initial_poses();
   }
   res->success = true;
 

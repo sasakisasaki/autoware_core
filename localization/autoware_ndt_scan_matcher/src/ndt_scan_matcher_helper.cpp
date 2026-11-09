@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <vector>
 
@@ -77,6 +78,16 @@ int count_oscillation(const std::vector<geometry_msgs::msg::Pose> & result_pose_
     max_oscillation_cnt = std::max(max_oscillation_cnt, oscillation_cnt);
   }
   return max_oscillation_cnt;
+}
+
+int64_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
+{
+  return static_cast<int64_t>(stamp.sec) * 1000000000LL + static_cast<int64_t>(stamp.nanosec);
+}
+
+double to_seconds(const int64_t nanoseconds)
+{
+  return std::chrono::duration<double>(std::chrono::nanoseconds(nanoseconds)).count();
 }
 
 }  // namespace autoware::ndt_scan_matcher

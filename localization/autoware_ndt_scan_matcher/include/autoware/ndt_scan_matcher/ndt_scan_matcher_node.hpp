@@ -25,7 +25,6 @@
 
 #include <autoware/agnocast_wrapper/node.hpp>
 #include <autoware/agnocast_wrapper/tf2.hpp>
-#include <autoware/localization_util/smart_pose_buffer.hpp>
 #include <autoware_utils_diagnostics/diagnostics_interface.hpp>
 #include <autoware_utils_logging/logger_level_configure.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -222,12 +221,8 @@ private:
   // which must not wait for a map update in progress.
   Guarded<std::optional<geometry_msgs::msg::Point>> last_map_update_position_{std::nullopt};
 
-  std::unique_ptr<autoware::localization_util::SmartPoseBuffer> initial_pose_buffer_;
-
   // Keep latest position for dynamic map loading
   Guarded<std::optional<geometry_msgs::msg::Point>> latest_ekf_position_{std::nullopt};
-
-  std::unique_ptr<autoware::localization_util::SmartPoseBuffer> regularization_pose_buffer_;
 
   std::atomic<bool> is_activated_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_scan_points_;
