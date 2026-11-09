@@ -22,7 +22,6 @@
 #include "map_update_module.hpp"
 #include "ndt_scan_matcher.hpp"
 #include "particle.hpp"
-#include "scan_match_diagnostics.hpp"
 
 #include <autoware/agnocast_wrapper/node.hpp>
 #include <autoware/agnocast_wrapper/tf2.hpp>
@@ -87,36 +86,6 @@ public:
   }
 
 private:
-  // A log line of the scan matching, written by the node with a throttle per kind.
-  struct ScanMatchLog
-  {
-    enum class Kind { TF_LOOKUP_FAILED, OUT_OF_MAP_RANGE, SCORE_BELOW_THRESHOLD };
-    Kind kind;
-    std::string message;
-  };
-
-  // What the debug outputs of a scan matching are made from.
-  struct ScanMatchDebug
-  {
-    float exe_time;
-    autoware::localization_util::SmartPoseBuffer::InterpolateResult interpolation_result;
-    NdtScanMatcherResult result;
-    pcl::PointCloud<PointSource> sensor_points_in_map;
-    NdtScanMatcherDebugScores scores;
-  };
-
-  // Everything a scan matching produces, for the node to log and publish.
-  struct ScanMatchOutput
-  {
-    bool is_succeed{false};         // whether the pose converged
-    DiagnosticsReport diagnostics;  // complete, ready to publish
-    std::vector<ScanMatchLog> logs;
-    std::optional<geometry_msgs::msg::TransformStamped> tf;
-    std::optional<geometry_msgs::msg::PoseStamped> ndt_pose;
-    std::optional<geometry_msgs::msg::PoseWithCovarianceStamped> ndt_pose_with_covariance;
-    std::optional<ScanMatchDebug> debug;
-  };
-
   void callback_timer();
 
   void callback_initial_pose(
@@ -133,20 +102,6 @@ private:
   void callback_sensor_points(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
     sensor_points_msg_in_sensor_frame);
-  // The scan matching of one scan, without the ROS runtime: the current time, the sensor to
-  // base_link transform and whether the voxel scores are wanted come in as inputs, and the
-  // diagnostics, logs and messages to publish go out in the output.
-  ScanMatchOutput scan_match(
-    const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
-    const rclcpp::Time & now,
-    const tl::expected<Eigen::Matrix4f, std::string> & sensor_to_base_link,
-    bool compute_voxel_scores);
-  // scan_match() up to the result of this scan; scan_match() adds the check over successive scans.
-  ScanMatchOutput scan_match_main(
-    const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
-    const rclcpp::Time & now,
-    const tl::expected<Eigen::Matrix4f, std::string> & sensor_to_base_link,
-    bool compute_voxel_scores);
   // Returns the error text of the TF lookup on failure.
   tl::expected<Eigen::Matrix4f, std::string> lookup_sensor_to_base_link(
     const std::string & sensor_frame);
@@ -196,9 +151,6 @@ private:
   static pcl::PointCloud<pcl::PointXYZRGB>::Ptr visualize_point_score(
     const pcl::PointCloud<pcl::PointXYZI> & nvs_points_in_map_i, const float & lower_nvs,
     const float & upper_nvs);
-
-  std::optional<geometry_msgs::msg::Pose> interpolate_regularization_pose(
-    const rclcpp::Time & sensor_ros_time);
 
   // Performs the pcd_loader service call for MapUpdateModule, returning nullptr on failure.
   MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr
@@ -270,8 +222,6 @@ private:
   // which must not wait for a map update in progress.
   Guarded<std::optional<geometry_msgs::msg::Point>> last_map_update_position_{std::nullopt};
 
-  pcl::shared_ptr<pcl::PointCloud<PointSource>> sensor_points_in_baselink_frame_;
-
   std::unique_ptr<autoware::localization_util::SmartPoseBuffer> initial_pose_buffer_;
 
   // Keep latest position for dynamic map loading
@@ -281,7 +231,6 @@ private:
 
   std::atomic<bool> is_activated_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_scan_points_;
-  std::unique_ptr<ScanMatchDiagnostics> scan_match_diagnostics_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_initial_pose_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_regularization_pose_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_map_update_;

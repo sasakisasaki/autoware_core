@@ -34,16 +34,25 @@ namespace
 {
 using autoware::ndt_scan_matcher::ConvergedParamType;
 using autoware::ndt_scan_matcher::CovarianceEstimationType;
+using autoware::ndt_scan_matcher::HyperParameters;
 using autoware::ndt_scan_matcher::MapUpdateModule;
 using autoware::ndt_scan_matcher::NdtScanMatcher;
-using autoware::ndt_scan_matcher::NdtScanMatcherConfig;
 using autoware::ndt_scan_matcher::NdtScanMatcherError;
 using autoware::ndt_scan_matcher::Particle;
+using autoware::ndt_scan_matcher::ScanMatchInput;
 using Cells = MapUpdateModule::GetDifferentialPointCloudMap::Response;
 
-NdtScanMatcherConfig make_default_config()
+HyperParameters make_default_config()
 {
-  NdtScanMatcherConfig config{};
+  HyperParameters config{};
+  config.frame.base_frame = "base_link";
+  config.frame.ndt_base_frame = "ndt_base_link";
+  config.frame.map_frame = "map";
+  config.sensor_points.timeout_sec = 1.0;
+  config.sensor_points.required_distance = 10.0;
+  config.validation.initial_to_result_distance_tolerance_m = 3.0;
+  config.validation.critical_upper_bound_exe_time_ms = 100.0;
+  config.validation.skipping_publish_num = 5;
   config.ndt.trans_epsilon = 0.01;
   config.ndt.step_size = 0.1;
   config.ndt.resolution = 2.0F;
@@ -140,12 +149,38 @@ bool matches_cell(NdtScanMatcher & scan_matcher, const std::string & id)
   return result.has_value() && result->is_converged;
 }
 
-NdtScanMatcherConfig make_initial_pose_estimation_config(const int64_t particles_num)
+HyperParameters make_initial_pose_estimation_config(const int64_t particles_num)
 {
-  NdtScanMatcherConfig config = make_default_config();
+  HyperParameters config = make_default_config();
   config.initial_pose_estimation.particles_num = particles_num;
   config.initial_pose_estimation.n_startup_trials = 2;
   return config;
+}
+
+// make_scan() as the sensor sends it, already in base_link.
+sensor_msgs::msg::PointCloud2 make_scan_msg()
+{
+  sensor_msgs::msg::PointCloud2 msg;
+  pcl::toROSMsg(*make_scan(), msg);
+  msg.header.frame_id = "base_link";
+  msg.header.stamp.sec = 1;
+  return msg;
+}
+
+// Inputs for a scan from make_scan_msg() received right away, with no initial pose.
+ScanMatchInput make_scan_input(const bool is_activated)
+{
+  ScanMatchInput input;
+  input.now.sec = 1;
+  input.sensor_to_base_link = Eigen::Matrix4f::Identity();
+  input.is_activated = is_activated;
+  return input;
+}
+
+// A scan reaching the activation check is kept for the initial pose estimation.
+void keep_scan(NdtScanMatcher & scan_matcher)
+{
+  scan_matcher.scan_match(make_scan_msg(), make_scan_input(false));
 }
 
 pcl::PointCloud<pcl::PointXYZ> make_points_at_heights(const std::vector<float> & heights)
@@ -239,7 +274,7 @@ TEST(NdtScanMatcher, ReportsNoBuildTimeWhenRebuildHasNoCells)  // NOLINT
 // The alignment would converge within the default 30 iterations.
 TEST(NdtScanMatcher, KeepsNdtParametersOnRebuild)  // NOLINT
 {
-  NdtScanMatcherConfig config = make_default_config();
+  HyperParameters config = make_default_config();
   config.ndt.max_iterations = 1;
   NdtScanMatcher scan_matcher(config);
 
@@ -273,7 +308,7 @@ TEST(NdtScanMatcher, ConvergesToTheMapFromANearbyInitialPose)  // NOLINT
 
 TEST(NdtScanMatcher, DoesNotConvergeWhenScoreIsBelowThreshold)  // NOLINT
 {
-  NdtScanMatcherConfig config = make_default_config();
+  HyperParameters config = make_default_config();
   config.score_estimation.converged_param_type = ConvergedParamType::TRANSFORM_PROBABILITY;
   config.score_estimation.converged_param_transform_probability = 1.0e9;
   NdtScanMatcher scan_matcher(config);
@@ -288,7 +323,7 @@ TEST(NdtScanMatcher, DoesNotConvergeWhenScoreIsBelowThreshold)  // NOLINT
 
 TEST(NdtScanMatcher, ReportsConfiguredCovarianceForFixedValue)  // NOLINT
 {
-  NdtScanMatcherConfig config = make_default_config();
+  HyperParameters config = make_default_config();
   config.covariance.output_pose_covariance[0] = 0.0225;
   config.covariance.output_pose_covariance[7] = 0.0225;
   config.covariance.covariance_estimation.covariance_estimation_type =
@@ -308,7 +343,7 @@ TEST(NdtScanMatcher, ReportsConfiguredCovarianceForFixedValue)  // NOLINT
 // Each pose array starts with the main alignment, followed by one pose per offset.
 TEST(NdtScanMatcher, ReportsMultiNdtPosesForMultiNdtCovariance)  // NOLINT
 {
-  NdtScanMatcherConfig config = make_default_config();
+  HyperParameters config = make_default_config();
   config.covariance.output_pose_covariance[0] = 0.0225;
   config.covariance.output_pose_covariance[7] = 0.0225;
   auto & estimation = config.covariance.covariance_estimation;
@@ -330,7 +365,7 @@ TEST(NdtScanMatcher, ReportsMultiNdtPosesForMultiNdtCovariance)  // NOLINT
 
 TEST(NdtScanMatcher, ScoresNoDebugOutputsWhenMapIsEmpty)  // NOLINT
 {
-  NdtScanMatcherConfig config = make_default_config();
+  HyperParameters config = make_default_config();
   config.score_estimation.no_ground_points.enable = true;
   NdtScanMatcher scan_matcher(config);
 
@@ -355,7 +390,7 @@ TEST(NdtScanMatcher, ScoresEachPointOnlyWhenRequested)  // NOLINT
 // Points no higher than the margin above the result pose are ground and removed.
 TEST(NdtScanMatcher, RemovesGroundPointsForNoGroundScores)  // NOLINT
 {
-  NdtScanMatcherConfig config = make_default_config();
+  HyperParameters config = make_default_config();
   config.score_estimation.no_ground_points.enable = true;
   config.score_estimation.no_ground_points.z_margin_for_ground_removal = 0.8;
   NdtScanMatcher scan_matcher(config);
@@ -371,21 +406,20 @@ TEST(NdtScanMatcher, RemovesGroundPointsForNoGroundScores)  // NOLINT
 TEST(NdtScanMatcher, ReportsMapNotSetWhenEstimatingInitialPoseBeforeFirstUpdate)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_initial_pose_estimation_config(4));
+  keep_scan(scan_matcher);
 
-  const auto result =
-    scan_matcher.estimate_initial_pose(make_scan(), make_pose_with_covariance(0.5, 0.3));
+  const auto result = scan_matcher.estimate_initial_pose(make_pose_with_covariance(0.5, 0.3));
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error(), NdtScanMatcherError::MAP_NOT_SET);
 }
 
-TEST(NdtScanMatcher, ReportsSensorPointsNotSetWhenEstimatingInitialPoseWithoutScan)  // NOLINT
+TEST(NdtScanMatcher, ReportsSensorPointsNotSetWhenEstimatingInitialPoseBeforeAnyScan)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_initial_pose_estimation_config(4));
   scan_matcher.update_map(make_rebuild({"0"}));
 
-  const auto result =
-    scan_matcher.estimate_initial_pose(nullptr, make_pose_with_covariance(0.5, 0.3));
+  const auto result = scan_matcher.estimate_initial_pose(make_pose_with_covariance(0.5, 0.3));
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error(), NdtScanMatcherError::SENSOR_POINTS_NOT_SET);
@@ -395,9 +429,9 @@ TEST(NdtScanMatcher, SearchesOneParticlePerParticlesNum)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_initial_pose_estimation_config(4));
   scan_matcher.update_map(make_rebuild({"0"}));
+  keep_scan(scan_matcher);
 
-  const auto result =
-    scan_matcher.estimate_initial_pose(make_scan(), make_pose_with_covariance(0.5, 0.3));
+  const auto result = scan_matcher.estimate_initial_pose(make_pose_with_covariance(0.5, 0.3));
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->debug.particles.size(), 4U);
@@ -407,9 +441,9 @@ TEST(NdtScanMatcher, ReturnsTheResultOfTheBestScoringParticle)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_initial_pose_estimation_config(4));
   scan_matcher.update_map(make_rebuild({"0"}));
+  keep_scan(scan_matcher);
 
-  const auto result =
-    scan_matcher.estimate_initial_pose(make_scan(), make_pose_with_covariance(0.5, 0.3));
+  const auto result = scan_matcher.estimate_initial_pose(make_pose_with_covariance(0.5, 0.3));
 
   ASSERT_TRUE(result.has_value());
   const auto & particles = result->debug.particles;
