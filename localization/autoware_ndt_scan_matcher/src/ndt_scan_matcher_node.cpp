@@ -402,18 +402,27 @@ void NdtScanMatcherNode::callback_sensor_points(
   sensor_points_msg_in_sensor_frame)
 {
   // scan matching
-  ScanMatchOutput output = callback_sensor_points_main(sensor_points_msg_in_sensor_frame);
+  const ScanMatchOutput output = scan_match(
+    *sensor_points_msg_in_sensor_frame, this->now(),
+    lookup_sensor_to_base_link(sensor_points_msg_in_sensor_frame->header.frame_id),
+    voxel_score_points_pub_->get_subscription_count() > 0);
 
   write_logs(output.logs);
 
-  // check skipping_publish_num
-  static int64_t skipping_publish_num = 0;
-  skipping_publish_num = ((output.is_succeed || !is_activated_) ? 0 : (skipping_publish_num + 1));
-  output.diagnostics.add_key_value({"skipping_publish_num", skipping_publish_num});
-  if (skipping_publish_num >= param_.validation.skipping_publish_num) {
-    std::stringstream message;
-    message << "skipping_publish_num exceed limit (" << skipping_publish_num << " times).";
-    output.diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+  // Main output
+  if (output.tf) {
+    tf2_broadcaster_.sendTransform(*output.tf);
+  }
+  if (output.ndt_pose) {
+    ndt_pose_pub_->publish(*output.ndt_pose);
+  }
+  if (output.ndt_pose_with_covariance) {
+    ndt_pose_with_covariance_pub_->publish(*output.ndt_pose_with_covariance);
+  }
+
+  // Debug output (to be removed after the interface refactoring)
+  if (output.debug) {
+    publish_debug(sensor_points_msg_in_sensor_frame->header.stamp, *output.debug);
   }
 
   diagnostics_scan_points_->clear();
@@ -439,9 +448,49 @@ void NdtScanMatcherNode::write_logs(const std::vector<ScanMatchLog> & logs)
   }
 }
 
-NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::callback_sensor_points_main(
-  const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
-  sensor_points_msg_in_sensor_frame)
+tl::expected<Eigen::Matrix4f, std::string> NdtScanMatcherNode::lookup_sensor_to_base_link(
+  const std::string & sensor_frame)
+{
+  if (sensor_frame == param_.frame.base_frame) {
+    return Eigen::Matrix4f::Identity();
+  }
+
+  try {
+    const geometry_msgs::msg::TransformStamped transform =
+      tf2_buffer_.lookupTransform(param_.frame.base_frame, sensor_frame, tf2::TimePointZero);
+    const geometry_msgs::msg::PoseStamped base_to_sensor_pose_stamped =
+      autoware_utils_geometry::transform2pose(transform);
+    return pose_to_matrix4f(base_to_sensor_pose_stamped.pose);
+  } catch (const std::exception & ex) {
+    return tl::make_unexpected(std::string(ex.what()));
+  }
+}
+
+NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::scan_match(
+  const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame, const rclcpp::Time & now,
+  const tl::expected<Eigen::Matrix4f, std::string> & sensor_to_base_link,
+  const bool compute_voxel_scores)
+{
+  ScanMatchOutput output = scan_match_main(
+    sensor_points_msg_in_sensor_frame, now, sensor_to_base_link, compute_voxel_scores);
+
+  // check skipping_publish_num
+  static int64_t skipping_publish_num = 0;
+  skipping_publish_num = ((output.is_succeed || !is_activated_) ? 0 : (skipping_publish_num + 1));
+  output.diagnostics.add_key_value({"skipping_publish_num", skipping_publish_num});
+  if (skipping_publish_num >= param_.validation.skipping_publish_num) {
+    std::stringstream message;
+    message << "skipping_publish_num exceed limit (" << skipping_publish_num << " times).";
+    output.diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
+  }
+
+  return output;
+}
+
+NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::scan_match_main(
+  const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame, const rclcpp::Time & now,
+  const tl::expected<Eigen::Matrix4f, std::string> & sensor_to_base_link,
+  const bool compute_voxel_scores)
 {
   const auto exe_start_time = std::chrono::system_clock::now();
 
@@ -449,11 +498,11 @@ NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::callback_sensor_points_m
   DiagnosticsReport & diagnostics = output.diagnostics;
 
   // check topic_time_stamp
-  const rclcpp::Time sensor_ros_time = sensor_points_msg_in_sensor_frame->header.stamp;
+  const rclcpp::Time sensor_ros_time = sensor_points_msg_in_sensor_frame.header.stamp;
   diagnostics.add_key_value({"topic_time_stamp", sensor_ros_time.nanoseconds()});
 
   // check sensor_points_size
-  const size_t sensor_points_size = sensor_points_msg_in_sensor_frame->width;
+  const size_t sensor_points_size = sensor_points_msg_in_sensor_frame.width;
   diagnostics.add_key_value({"sensor_points_size", static_cast<int64_t>(sensor_points_size)});
   if (sensor_points_size == 0) {
     std::stringstream message;
@@ -464,7 +513,7 @@ NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::callback_sensor_points_m
 
   // check sensor_points_delay_time_sec
   const double sensor_points_delay_time_sec =
-    (this->now() - sensor_points_msg_in_sensor_frame->header.stamp).seconds();
+    (now - sensor_points_msg_in_sensor_frame.header.stamp).seconds();
   diagnostics.add_key_value({"sensor_points_delay_time_sec", sensor_points_delay_time_sec});
   if (sensor_points_delay_time_sec > param_.sensor_points.timeout_sec) {
     std::stringstream message;
@@ -486,23 +535,25 @@ NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::callback_sensor_points_m
     new pcl::PointCloud<PointSource>);
   pcl::shared_ptr<pcl::PointCloud<PointSource>> sensor_points_in_baselink_frame(
     new pcl::PointCloud<PointSource>);
-  const std::string & sensor_frame = sensor_points_msg_in_sensor_frame->header.frame_id;
+  const std::string & sensor_frame = sensor_points_msg_in_sensor_frame.header.frame_id;
 
-  pcl::fromROSMsg(*sensor_points_msg_in_sensor_frame, *sensor_points_in_sensor_frame);
+  pcl::fromROSMsg(sensor_points_msg_in_sensor_frame, *sensor_points_in_sensor_frame);
 
   // transform sensor points from sensor-frame to base_link
-  try {
-    transform_sensor_measurement(
-      sensor_frame, param_.frame.base_frame, sensor_points_in_sensor_frame,
-      sensor_points_in_baselink_frame);
-  } catch (const std::exception & ex) {
+  if (!sensor_to_base_link) {
     std::stringstream message;
-    message << ex.what() << ". Please publish TF " << sensor_frame << " to "
+    message << sensor_to_base_link.error() << ". Please publish TF " << sensor_frame << " to "
             << param_.frame.base_frame;
     diagnostics.update_level_and_message(DiagnosticLevel::ERROR, message.str());
     output.logs.push_back({ScanMatchLog::Kind::TF_LOOKUP_FAILED, message.str()});
     diagnostics.add_key_value({"is_succeed_transform_sensor_points", false});
     return output;
+  }
+  if (sensor_frame == param_.frame.base_frame) {
+    sensor_points_in_baselink_frame = sensor_points_in_sensor_frame;
+  } else {
+    autoware_utils_pcl::transform_pointcloud(
+      *sensor_points_in_sensor_frame, *sensor_points_in_baselink_frame, *sensor_to_base_link);
   }
   diagnostics.add_key_value({"is_succeed_transform_sensor_points", true});
 
@@ -579,7 +630,7 @@ NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::callback_sensor_points_m
   }
 
   // perform ndt scan matching
-  const auto align_result = ndt_scan_matcher_->align(
+  auto align_result = ndt_scan_matcher_->align(
     sensor_points_in_baselink_frame, interpolation_result.interpolated_pose.pose.pose,
     regularization_pose);
 
@@ -592,7 +643,7 @@ NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::callback_sensor_points_m
     diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
     return output;
   }
-  const NdtScanMatcherResult & result = align_result.value();
+  NdtScanMatcherResult & result = align_result.value();
   const pclomp::NdtResult & ndt_result = result.ndt_result;
 
   ScanMatchDiagnosticValues diagnostic_values;
@@ -638,28 +689,47 @@ NdtScanMatcherNode::ScanMatchOutput NdtScanMatcherNode::callback_sensor_points_m
 
   append_report(diagnostics, scan_match_diagnostics_->make_report(diagnostic_values));
 
-  // Main output
-  publish_tf(sensor_ros_time, result.pose);
-  publish_pose(sensor_ros_time, result.pose, result.covariance, result.is_converged);
+  // Main output: the TF always, the pose only when converged
+  geometry_msgs::msg::PoseStamped result_pose_stamped_msg;
+  result_pose_stamped_msg.header.stamp = sensor_ros_time;
+  result_pose_stamped_msg.header.frame_id = param_.frame.map_frame;
+  result_pose_stamped_msg.pose = result.pose;
+  output.tf =
+    autoware_utils_geometry::pose2transform(result_pose_stamped_msg, param_.frame.ndt_base_frame);
+
+  if (result.is_converged) {
+    geometry_msgs::msg::PoseWithCovarianceStamped result_pose_with_cov_msg;
+    result_pose_with_cov_msg.header = result_pose_stamped_msg.header;
+    result_pose_with_cov_msg.pose.pose = result.pose;
+    result_pose_with_cov_msg.pose.covariance = result.covariance;
+    output.ndt_pose = result_pose_stamped_msg;
+    output.ndt_pose_with_covariance = result_pose_with_cov_msg;
+  }
+  output.is_succeed = result.is_converged;
 
   // Debug output (to be removed after the interface refactoring)
-  publish_debug(
-    sensor_ros_time, exe_time, interpolation_result, *sensor_points_in_baselink_frame, result);
+  pcl::PointCloud<PointSource> sensor_points_in_map;
+  autoware_utils_pcl::transform_pointcloud(
+    *sensor_points_in_baselink_frame, sensor_points_in_map, ndt_result.pose);
+  NdtScanMatcherDebugScores scores = ndt_scan_matcher_->compute_debug_scores(
+    sensor_points_in_map, result.pose, compute_voxel_scores);
+  output.debug = ScanMatchDebug{
+    exe_time, interpolation_result, std::move(result), std::move(sensor_points_in_map),
+    std::move(scores)};
 
-  output.is_succeed = result.is_converged;
   return output;
 }
 
 void NdtScanMatcherNode::publish_debug(
-  const rclcpp::Time & sensor_ros_time, const float exe_time,
-  const SmartPoseBuffer::InterpolateResult & interpolation_result,
-  const pcl::PointCloud<PointSource> & sensor_points_in_baselink_frame,
-  const NdtScanMatcherResult & result)
+  const rclcpp::Time & sensor_ros_time, const ScanMatchDebug & debug)
 {
+  const SmartPoseBuffer::InterpolateResult & interpolation_result = debug.interpolation_result;
+  const NdtScanMatcherResult & result = debug.result;
   const pclomp::NdtResult & ndt_result = result.ndt_result;
+  const NdtScanMatcherDebugScores & scores = debug.scores;
 
   initial_pose_with_covariance_pub_->publish(interpolation_result.interpolated_pose);
-  exe_time_pub_->publish(make_float32_stamped(sensor_ros_time, exe_time));
+  exe_time_pub_->publish(make_float32_stamped(sensor_ros_time, debug.exe_time));
   transform_probability_pub_->publish(
     make_float32_stamped(sensor_ros_time, ndt_result.transform_probability));
   nearest_voxel_transformation_likelihood_pub_->publish(
@@ -671,14 +741,7 @@ void NdtScanMatcherNode::publish_debug(
     sensor_ros_time, result.pose, interpolation_result.interpolated_pose,
     interpolation_result.old_pose, interpolation_result.new_pose);
 
-  pcl::shared_ptr<pcl::PointCloud<PointSource>> sensor_points_in_map_ptr(
-    new pcl::PointCloud<PointSource>);
-  autoware_utils_pcl::transform_pointcloud(
-    sensor_points_in_baselink_frame, *sensor_points_in_map_ptr, ndt_result.pose);
-  publish_point_cloud(sensor_ros_time, param_.frame.map_frame, sensor_points_in_map_ptr);
-
-  const NdtScanMatcherDebugScores scores = ndt_scan_matcher_->compute_debug_scores(
-    *sensor_points_in_map_ptr, result.pose, voxel_score_points_pub_->get_subscription_count() > 0);
+  publish_point_cloud(sensor_ros_time, param_.frame.map_frame, debug.sensor_points_in_map);
 
   // check each of point score
   if (scores.voxel_scores) {
@@ -730,69 +793,12 @@ void NdtScanMatcherNode::publish_multi_ndt_poses(
   }
 }
 
-void NdtScanMatcherNode::transform_sensor_measurement(
-  const std::string & source_frame, const std::string & target_frame,
-  const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_input_ptr,
-  pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_output_ptr)
-{
-  if (source_frame == target_frame) {
-    sensor_points_output_ptr = sensor_points_input_ptr;
-    return;
-  }
-
-  geometry_msgs::msg::TransformStamped transform;
-  try {
-    transform = tf2_buffer_.lookupTransform(target_frame, source_frame, tf2::TimePointZero);
-  } catch (const tf2::TransformException & ex) {
-    throw;
-  }
-
-  const geometry_msgs::msg::PoseStamped target_to_source_pose_stamped =
-    autoware_utils_geometry::transform2pose(transform);
-  const Eigen::Matrix4f base_to_sensor_matrix =
-    pose_to_matrix4f(target_to_source_pose_stamped.pose);
-  autoware_utils_pcl::transform_pointcloud(
-    *sensor_points_input_ptr, *sensor_points_output_ptr, base_to_sensor_matrix);
-}
-
-void NdtScanMatcherNode::publish_tf(
-  const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg)
-{
-  geometry_msgs::msg::PoseStamped result_pose_stamped_msg;
-  result_pose_stamped_msg.header.stamp = sensor_ros_time;
-  result_pose_stamped_msg.header.frame_id = param_.frame.map_frame;
-  result_pose_stamped_msg.pose = result_pose_msg;
-  tf2_broadcaster_.sendTransform(
-    autoware_utils_geometry::pose2transform(result_pose_stamped_msg, param_.frame.ndt_base_frame));
-}
-
-void NdtScanMatcherNode::publish_pose(
-  const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
-  const std::array<double, 36> & ndt_covariance, const bool is_converged)
-{
-  geometry_msgs::msg::PoseStamped result_pose_stamped_msg;
-  result_pose_stamped_msg.header.stamp = sensor_ros_time;
-  result_pose_stamped_msg.header.frame_id = param_.frame.map_frame;
-  result_pose_stamped_msg.pose = result_pose_msg;
-
-  geometry_msgs::msg::PoseWithCovarianceStamped result_pose_with_cov_msg;
-  result_pose_with_cov_msg.header.stamp = sensor_ros_time;
-  result_pose_with_cov_msg.header.frame_id = param_.frame.map_frame;
-  result_pose_with_cov_msg.pose.pose = result_pose_msg;
-  result_pose_with_cov_msg.pose.covariance = ndt_covariance;
-
-  if (is_converged) {
-    ndt_pose_pub_->publish(result_pose_stamped_msg);
-    ndt_pose_with_covariance_pub_->publish(result_pose_with_cov_msg);
-  }
-}
-
 void NdtScanMatcherNode::publish_point_cloud(
   const rclcpp::Time & sensor_ros_time, const std::string & frame_id,
-  const pcl::shared_ptr<pcl::PointCloud<PointSource>> & sensor_points_in_map_ptr)
+  const pcl::PointCloud<PointSource> & sensor_points_in_map)
 {
   auto sensor_points_msg_in_map = ALLOCATE_OUTPUT_MESSAGE_UNIQUE(sensor_aligned_pose_pub_);
-  pcl::toROSMsg(*sensor_points_in_map_ptr, *sensor_points_msg_in_map);
+  pcl::toROSMsg(sensor_points_in_map, *sensor_points_msg_in_map);
   sensor_points_msg_in_map->header.stamp = sensor_ros_time;
   sensor_points_msg_in_map->header.frame_id = frame_id;
   sensor_aligned_pose_pub_->publish(std::move(sensor_points_msg_in_map));
@@ -1059,11 +1065,11 @@ void NdtScanMatcherNode::publish_initial_pose_estimation_debug(
       marker_array.markers.clear();
     }
 
-    auto sensor_points_in_map_ptr = std::make_shared<pcl::PointCloud<PointSource>>();
+    pcl::PointCloud<PointSource> sensor_points_in_map;
     autoware_utils_pcl::transform_pointcloud(
-      sensor_points_in_baselink_frame, *sensor_points_in_map_ptr,
+      sensor_points_in_baselink_frame, sensor_points_in_map,
       pose_to_matrix4f(particle.result_pose));
-    publish_point_cloud(stamp, param_.frame.map_frame, sensor_points_in_map_ptr);
+    publish_point_cloud(stamp, param_.frame.map_frame, sensor_points_in_map);
   }
 }
 
