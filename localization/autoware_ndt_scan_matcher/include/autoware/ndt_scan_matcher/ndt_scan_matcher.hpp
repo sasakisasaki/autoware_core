@@ -19,10 +19,12 @@
 #include "hyper_parameters.hpp"
 #include "map_update_module.hpp"
 #include "ndt_omp/multigrid_ndt_omp.h"
+#include "particle.hpp"
 
 #include <tl_expected/expected.hpp>
 
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_with_covariance.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -30,6 +32,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace autoware::ndt_scan_matcher
@@ -40,10 +43,12 @@ struct NdtScanMatcherConfig
   pclomp::NdtParams ndt;
   HyperParameters::ScoreEstimation score_estimation;
   HyperParameters::Covariance covariance;
+  HyperParameters::InitialPoseEstimation initial_pose_estimation;
 };
 
 enum class NdtScanMatcherError {
   MAP_NOT_SET,
+  SENSOR_POINTS_NOT_SET,
 };
 
 struct NdtScanMatcherResult
@@ -91,6 +96,20 @@ struct NdtScanMatcherDebugScores
   std::optional<NoGround> no_ground;
 };
 
+struct InitialPoseEstimationResult
+{
+  // The result pose of the best particle, in the map frame, and its nearest voxel transformation
+  // likelihood.
+  geometry_msgs::msg::Pose pose;
+  double score{0.0};
+
+  // Only for the debug outputs.
+  struct Debug
+  {
+    std::vector<Particle> particles;  // in the order they were searched
+  } debug;
+};
+
 // Matches sensor scans against the point cloud map held in its NDT.
 //
 // update_map() and the NDT access may be called from different threads: a differential map update
@@ -122,14 +141,14 @@ public:
     const pcl::PointCloud<pcl::PointXYZ> & sensor_points_in_map,
     const geometry_msgs::msg::Pose & result_pose, bool compute_voxel_scores);
 
-  // Temporary direct access to the NDT, holding its lock, for the code that has not moved into this
-  // class yet: the particle search of the align service.
-  template <typename F>
-  auto with_ndt(F && f)
-  {
-    return ndt_ptr_.with(
-      [&](const std::shared_ptr<NormalDistributionsTransform> & ndt_ptr) { return f(ndt_ptr); });
-  }
+  // Searches for the pose of the scan around initial_pose by aligning it from particles sampled
+  // by its covariance, with the yaw sampled uniformly. Fails when no map or no scan is set.
+  tl::expected<InitialPoseEstimationResult, NdtScanMatcherError> estimate_initial_pose(
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr & sensor_points_in_base_link,
+    const geometry_msgs::msg::PoseWithCovariance & initial_pose);
+
+  // The ids of the map cells currently held in the NDT, sorted.
+  std::vector<std::string> map_ids();
 
 private:
   NdtScanMatcherConfig config_;

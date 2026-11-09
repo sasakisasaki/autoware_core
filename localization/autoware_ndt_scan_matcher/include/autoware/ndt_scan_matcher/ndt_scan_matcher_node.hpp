@@ -21,7 +21,7 @@
 #include "hyper_parameters_loader.hpp"
 #include "map_update_module.hpp"
 #include "ndt_scan_matcher.hpp"
-#include "ndt_omp/multigrid_ndt_omp.h"
+#include "particle.hpp"
 #include "scan_match_diagnostics.hpp"
 
 #include <autoware/agnocast_wrapper/node.hpp>
@@ -73,9 +73,6 @@ using DiagnosticsInterface =
 class NdtScanMatcherNode : public autoware::agnocast_wrapper::Node
 {
   using PointSource = pcl::PointXYZ;
-  using PointTarget = pcl::PointXYZ;
-  using NormalDistributionsTransform =
-    pclomp::MultiGridNormalDistributionsTransform<PointSource, PointTarget>;
 
 public:
   explicit NdtScanMatcherNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
@@ -120,9 +117,11 @@ private:
       req,
     autoware_internal_localization_msgs::srv::PoseWithCovarianceStamped::Response::SharedPtr res);
 
-  std::tuple<geometry_msgs::msg::PoseWithCovarianceStamped, double> align_pose(
-    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_with_cov,
-    NormalDistributionsTransform & ndt_ref);
+  // Publishes the debug outputs of the particle search of the align service.
+  void publish_initial_pose_estimation_debug(
+    const rclcpp::Time & stamp,
+    const pcl::PointCloud<PointSource> & sensor_points_in_baselink_frame,
+    const std::vector<Particle> & particles);
 
   void transform_sensor_measurement(
     const std::string & source_frame, const std::string & target_frame,

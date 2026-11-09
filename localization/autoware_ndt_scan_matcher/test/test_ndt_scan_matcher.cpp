@@ -22,6 +22,8 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -36,6 +38,7 @@ using autoware::ndt_scan_matcher::MapUpdateModule;
 using autoware::ndt_scan_matcher::NdtScanMatcher;
 using autoware::ndt_scan_matcher::NdtScanMatcherConfig;
 using autoware::ndt_scan_matcher::NdtScanMatcherError;
+using autoware::ndt_scan_matcher::Particle;
 using Cells = MapUpdateModule::GetDifferentialPointCloudMap::Response;
 
 NdtScanMatcherConfig make_default_config()
@@ -76,11 +79,6 @@ MapUpdateModule::NdtUpdate make_differential_update(
   return MapUpdateModule::NdtUpdate{false, make_cells(ids_to_add, ids_to_remove)};
 }
 
-std::vector<std::string> map_ids_of(NdtScanMatcher & scan_matcher)
-{
-  return scan_matcher.with_ndt([](const auto & ndt_ptr) { return ndt_ptr->getCurrentMapIDs(); });
-}
-
 // The sample cubic pcd thinned out like a sensor scan; it matches the map of make_cells().
 pcl::PointCloud<pcl::PointXYZ>::ConstPtr make_scan()
 {
@@ -102,6 +100,27 @@ geometry_msgs::msg::Pose make_pose(const double x, const double y, const double 
   return pose;
 }
 
+geometry_msgs::msg::PoseWithCovariance make_pose_with_covariance(const double x, const double y)
+{
+  geometry_msgs::msg::PoseWithCovariance pose;
+  pose.pose = make_pose(x, y, 0.0);
+  pose.covariance[0] = 0.25;
+  pose.covariance[7] = 0.25;
+  pose.covariance[14] = 0.0025;
+  pose.covariance[21] = 0.0006853891909122467;
+  pose.covariance[28] = 0.0006853891909122467;
+  pose.covariance[35] = 0.06853891909122467;
+  return pose;
+}
+
+NdtScanMatcherConfig make_initial_pose_estimation_config(const int64_t particles_num)
+{
+  NdtScanMatcherConfig config = make_default_config();
+  config.initial_pose_estimation.particles_num = particles_num;
+  config.initial_pose_estimation.n_startup_trials = 2;
+  return config;
+}
+
 pcl::PointCloud<pcl::PointXYZ> make_points_at_heights(const std::vector<float> & heights)
 {
   pcl::PointCloud<pcl::PointXYZ> points;
@@ -116,7 +135,7 @@ TEST(NdtScanMatcher, HoldsNoMapBeforeFirstUpdate)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_default_config());
 
-  EXPECT_TRUE(map_ids_of(scan_matcher).empty());
+  EXPECT_TRUE(scan_matcher.map_ids().empty());
 }
 
 TEST(NdtScanMatcher, LoadsCellsOnRebuild)  // NOLINT
@@ -125,7 +144,7 @@ TEST(NdtScanMatcher, LoadsCellsOnRebuild)  // NOLINT
 
   scan_matcher.update_map(make_rebuild({"0"}));
 
-  EXPECT_EQ(map_ids_of(scan_matcher), std::vector<std::string>{"0"});
+  EXPECT_EQ(scan_matcher.map_ids(), std::vector<std::string>{"0"});
 }
 
 TEST(NdtScanMatcher, ReplacesMapOnRebuild)  // NOLINT
@@ -135,7 +154,7 @@ TEST(NdtScanMatcher, ReplacesMapOnRebuild)  // NOLINT
 
   scan_matcher.update_map(make_rebuild({"1"}));
 
-  EXPECT_EQ(map_ids_of(scan_matcher), std::vector<std::string>{"1"});
+  EXPECT_EQ(scan_matcher.map_ids(), std::vector<std::string>{"1"});
 }
 
 TEST(NdtScanMatcher, LeavesMapEmptyWhenRebuildHasNoCells)  // NOLINT
@@ -145,7 +164,7 @@ TEST(NdtScanMatcher, LeavesMapEmptyWhenRebuildHasNoCells)  // NOLINT
 
   scan_matcher.update_map(MapUpdateModule::NdtUpdate{true, nullptr});
 
-  EXPECT_TRUE(map_ids_of(scan_matcher).empty());
+  EXPECT_TRUE(scan_matcher.map_ids().empty());
 }
 
 // A differential update builds on the map of the preceding rebuild.
@@ -156,7 +175,7 @@ TEST(NdtScanMatcher, AddsCellsOnDifferentialUpdate)  // NOLINT
 
   scan_matcher.update_map(make_differential_update({"1"}, {}));
 
-  EXPECT_EQ(map_ids_of(scan_matcher), (std::vector<std::string>{"0", "1"}));
+  EXPECT_EQ(scan_matcher.map_ids(), (std::vector<std::string>{"0", "1"}));
 }
 
 TEST(NdtScanMatcher, RemovesCellsOnDifferentialUpdate)  // NOLINT
@@ -166,7 +185,7 @@ TEST(NdtScanMatcher, RemovesCellsOnDifferentialUpdate)  // NOLINT
 
   scan_matcher.update_map(make_differential_update({}, {"0"}));
 
-  EXPECT_EQ(map_ids_of(scan_matcher), std::vector<std::string>{"1"});
+  EXPECT_EQ(scan_matcher.map_ids(), std::vector<std::string>{"1"});
 }
 
 TEST(NdtScanMatcher, ReportsBuildTimeWhenCellsAreApplied)  // NOLINT
@@ -187,16 +206,18 @@ TEST(NdtScanMatcher, ReportsNoBuildTimeWhenRebuildHasNoCells)  // NOLINT
   EXPECT_FALSE(exe_time.has_value());
 }
 
+// The alignment would converge within the default 30 iterations.
 TEST(NdtScanMatcher, KeepsNdtParametersOnRebuild)  // NOLINT
 {
-  NdtScanMatcher scan_matcher(make_default_config());
+  NdtScanMatcherConfig config = make_default_config();
+  config.ndt.max_iterations = 1;
+  NdtScanMatcher scan_matcher(config);
 
   scan_matcher.update_map(make_rebuild({"0"}));
 
-  const auto params =
-    scan_matcher.with_ndt([](const auto & ndt_ptr) { return ndt_ptr->getParams(); });
-  EXPECT_FLOAT_EQ(params.resolution, 2.0F);
-  EXPECT_EQ(params.max_iterations, 30);
+  const auto result = scan_matcher.align(make_scan(), make_pose(0.5, 0.3, 0.0), std::nullopt);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->is_ok_iteration_num);
 }
 
 TEST(NdtScanMatcher, ThrowsWhenDifferentialUpdateHasNoCells)  // NOLINT
@@ -325,4 +346,58 @@ TEST(NdtScanMatcher, RemovesGroundPointsForNoGroundScores)  // NOLINT
 
   ASSERT_TRUE(scores.no_ground.has_value());
   EXPECT_EQ(scores.no_ground->points_in_map.size(), 1U);
+}
+
+TEST(NdtScanMatcher, ReportsMapNotSetWhenEstimatingInitialPoseBeforeFirstUpdate)  // NOLINT
+{
+  NdtScanMatcher scan_matcher(make_initial_pose_estimation_config(4));
+
+  const auto result =
+    scan_matcher.estimate_initial_pose(make_scan(), make_pose_with_covariance(0.5, 0.3));
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error(), NdtScanMatcherError::MAP_NOT_SET);
+}
+
+TEST(NdtScanMatcher, ReportsSensorPointsNotSetWhenEstimatingInitialPoseWithoutScan)  // NOLINT
+{
+  NdtScanMatcher scan_matcher(make_initial_pose_estimation_config(4));
+  scan_matcher.update_map(make_rebuild({"0"}));
+
+  const auto result =
+    scan_matcher.estimate_initial_pose(nullptr, make_pose_with_covariance(0.5, 0.3));
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error(), NdtScanMatcherError::SENSOR_POINTS_NOT_SET);
+}
+
+TEST(NdtScanMatcher, SearchesOneParticlePerParticlesNum)  // NOLINT
+{
+  NdtScanMatcher scan_matcher(make_initial_pose_estimation_config(4));
+  scan_matcher.update_map(make_rebuild({"0"}));
+
+  const auto result =
+    scan_matcher.estimate_initial_pose(make_scan(), make_pose_with_covariance(0.5, 0.3));
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->debug.particles.size(), 4U);
+}
+
+TEST(NdtScanMatcher, ReturnsTheResultOfTheBestScoringParticle)  // NOLINT
+{
+  NdtScanMatcher scan_matcher(make_initial_pose_estimation_config(4));
+  scan_matcher.update_map(make_rebuild({"0"}));
+
+  const auto result =
+    scan_matcher.estimate_initial_pose(make_scan(), make_pose_with_covariance(0.5, 0.3));
+
+  ASSERT_TRUE(result.has_value());
+  const auto & particles = result->debug.particles;
+  const auto best = std::max_element(
+    particles.begin(), particles.end(),
+    [](const Particle & lhs, const Particle & rhs) { return lhs.score < rhs.score; });
+  ASSERT_NE(best, particles.end());
+  EXPECT_DOUBLE_EQ(result->score, best->score);
+  EXPECT_DOUBLE_EQ(result->pose.position.x, best->result_pose.position.x);
+  EXPECT_DOUBLE_EQ(result->pose.position.y, best->result_pose.position.y);
 }
