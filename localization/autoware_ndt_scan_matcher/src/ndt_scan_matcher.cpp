@@ -423,9 +423,4 @@ NdtScanMatcher::estimate_initial_pose(
   });
 }
 
-std::vector<std::string> NdtScanMatcher::map_ids()
-{
-  return ndt_ptr_.with([](const auto & ndt_ptr) { return ndt_ptr->getCurrentMapIDs(); });
-}
-
 }  // namespace autoware::ndt_scan_matcher
