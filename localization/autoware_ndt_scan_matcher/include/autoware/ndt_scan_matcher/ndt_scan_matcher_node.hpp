@@ -84,6 +84,21 @@ public:
   }
 
 private:
+  // A log line of the scan matching, written by the node with a throttle per kind.
+  struct ScanMatchLog
+  {
+    enum class Kind { TF_LOOKUP_FAILED, OUT_OF_MAP_RANGE, SCORE_BELOW_THRESHOLD };
+    Kind kind;
+    std::string message;
+  };
+
+  struct ScanMatchOutput
+  {
+    bool is_succeed{false};  // whether a converged pose was published
+    DiagnosticsReport diagnostics;
+    std::vector<ScanMatchLog> logs;
+  };
+
   void callback_timer();
 
   void callback_initial_pose(
@@ -100,9 +115,10 @@ private:
   void callback_sensor_points(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
     sensor_points_msg_in_sensor_frame);
-  bool callback_sensor_points_main(
+  ScanMatchOutput callback_sensor_points_main(
     const AUTOWARE_MESSAGE_CONST_SHARED_PTR(sensor_msgs::msg::PointCloud2) &
     sensor_points_msg_in_sensor_frame);
+  void write_logs(const std::vector<ScanMatchLog> & logs);
 
   void service_trigger_node(
     const std_srvs::srv::SetBool::Request::SharedPtr req,
