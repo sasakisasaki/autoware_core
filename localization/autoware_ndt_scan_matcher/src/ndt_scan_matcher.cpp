@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "ndt_scan_matcher_helper.hpp"
+
+#include <autoware/localization_util/util_func.hpp>
+#include <autoware/ndt_scan_matcher/ndt_omp/estimate_covariance.hpp>
 #include <autoware/ndt_scan_matcher/ndt_scan_matcher.hpp>
 
 #include <pcl_conversions/pcl_conversions.h>
@@ -22,11 +26,17 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace autoware::ndt_scan_matcher
 {
+using autoware::localization_util::matrix4f_to_pose;
+using autoware::localization_util::pose_to_matrix4f;
+
 namespace
 {
+using AlignResult = tl::expected<NdtScanMatcherResult, NdtScanMatcherError>;
+
 // Adds and removes the given map cells on the NDT. Returns the time it took in milliseconds.
 double apply_map_cells(
   NdtScanMatcher::NormalDistributionsTransform & ndt,
@@ -59,10 +69,77 @@ std::shared_ptr<NdtScanMatcher::NormalDistributionsTransform> make_empty_ndt(
   ndt_ptr->setParams(params);
   return ndt_ptr;
 }
+
+struct CovarianceEstimate
+{
+  Eigen::Matrix2d covariance;
+  std::optional<std::vector<geometry_msgs::msg::Pose>> multi_ndt_poses;
+  std::optional<std::vector<geometry_msgs::msg::Pose>> multi_initial_poses;
+};
+
+// Estimates the xy covariance of the alignment by the configured method, which must not be
+// FIXED_VALUE.
+CovarianceEstimate estimate_covariance(
+  const pclomp::NdtResult & ndt_result, const Eigen::Matrix4f & initial_pose_matrix,
+  NdtScanMatcher::NormalDistributionsTransform & ndt,
+  const pcl::PointCloud<pcl::PointXYZ>::ConstPtr & sensor_points_in_base_link,
+  const HyperParameters::Covariance & param)
+{
+  std::vector<geometry_msgs::msg::Pose> multi_ndt_poses{matrix4f_to_pose(ndt_result.pose)};
+  std::vector<geometry_msgs::msg::Pose> multi_initial_poses{matrix4f_to_pose(initial_pose_matrix)};
+
+  if (
+    param.covariance_estimation.covariance_estimation_type ==
+    CovarianceEstimationType::LAPLACE_APPROXIMATION) {
+    return {
+      pclomp::estimate_xy_covariance_by_laplace_approximation(ndt_result.hessian), std::nullopt,
+      std::nullopt};
+  } else if (
+    param.covariance_estimation.covariance_estimation_type == CovarianceEstimationType::MULTI_NDT) {
+    const std::vector<Eigen::Matrix4f> poses_to_search = pclomp::propose_poses_to_search(
+      ndt_result, param.covariance_estimation.initial_pose_offset_model_x,
+      param.covariance_estimation.initial_pose_offset_model_y);
+    const pclomp::ResultOfMultiNdtCovarianceEstimation result_of_multi_ndt_covariance_estimation =
+      estimate_xy_covariance_by_multi_ndt(
+        ndt_result, ndt, poses_to_search, sensor_points_in_base_link);
+    for (size_t i = 0; i < result_of_multi_ndt_covariance_estimation.ndt_initial_poses.size();
+         i++) {
+      multi_ndt_poses.push_back(
+        matrix4f_to_pose(result_of_multi_ndt_covariance_estimation.ndt_results[i].pose));
+      multi_initial_poses.push_back(
+        matrix4f_to_pose(result_of_multi_ndt_covariance_estimation.ndt_initial_poses[i]));
+    }
+    return {
+      result_of_multi_ndt_covariance_estimation.covariance, std::move(multi_ndt_poses),
+      std::move(multi_initial_poses)};
+  } else if (
+    param.covariance_estimation.covariance_estimation_type ==
+    CovarianceEstimationType::MULTI_NDT_SCORE) {
+    const std::vector<Eigen::Matrix4f> poses_to_search = pclomp::propose_poses_to_search(
+      ndt_result, param.covariance_estimation.initial_pose_offset_model_x,
+      param.covariance_estimation.initial_pose_offset_model_y);
+    const pclomp::ResultOfMultiNdtCovarianceEstimation
+      result_of_multi_ndt_score_covariance_estimation = estimate_xy_covariance_by_multi_ndt_score(
+        ndt_result, ndt, poses_to_search, sensor_points_in_base_link,
+        param.covariance_estimation.temperature);
+    for (const auto & sub_initial_pose_matrix : poses_to_search) {
+      multi_initial_poses.push_back(matrix4f_to_pose(sub_initial_pose_matrix));
+    }
+    return {
+      result_of_multi_ndt_score_covariance_estimation.covariance, std::nullopt,
+      std::move(multi_initial_poses)};
+  } else {
+    return {
+      Eigen::Matrix2d::Identity() * param.output_pose_covariance[0 + 6 * 0], std::nullopt,
+      std::nullopt};
+  }
+}
 }  // namespace
 
 NdtScanMatcher::NdtScanMatcher(const NdtScanMatcherConfig & config)
-: ndt_ptr_(make_empty_ndt(config.ndt)), secondary_ndt_ptr_(make_empty_ndt(config.ndt))
+: config_(config),
+  ndt_ptr_(make_empty_ndt(config.ndt)),
+  secondary_ndt_ptr_(make_empty_ndt(config.ndt))
 {
 }
 
@@ -116,6 +193,137 @@ std::optional<double> NdtScanMatcher::update_map(const MapUpdateModule::NdtUpdat
     new_ndt_ptr.reset();
 
     return exe_time;
+  });
+}
+
+tl::expected<NdtScanMatcherResult, NdtScanMatcherError> NdtScanMatcher::align(
+  const pcl::PointCloud<pcl::PointXYZ>::ConstPtr & sensor_points_in_base_link,
+  const geometry_msgs::msg::Pose & initial_pose,
+  const std::optional<geometry_msgs::msg::Pose> & regularization_pose)
+{
+  return ndt_ptr_.with([&](auto & ndt_ptr) -> AlignResult {
+    ndt_ptr->unsetRegularizationPose();
+    if (regularization_pose) {
+      ndt_ptr->setRegularizationPose(pose_to_matrix4f(*regularization_pose));
+    }
+
+    if (!ndt_ptr->hasTarget()) {
+      return tl::unexpected(NdtScanMatcherError::MAP_NOT_SET);
+    }
+
+    // perform ndt scan matching
+    const Eigen::Matrix4f initial_pose_matrix = pose_to_matrix4f(initial_pose);
+    auto output_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    ndt_ptr->align(*output_cloud, initial_pose_matrix, sensor_points_in_base_link);
+
+    NdtScanMatcherResult result;
+    result.ndt_result = ndt_ptr->getResult();
+    const pclomp::NdtResult & ndt_result = result.ndt_result;
+    result.pose = matrix4f_to_pose(ndt_result.pose);
+    for (const auto & pose_matrix : ndt_result.transformation_array) {
+      result.debug.transformation_array.push_back(matrix4f_to_pose(pose_matrix));
+    }
+
+    // check iteration_num
+    result.is_ok_iteration_num = (ndt_result.iteration_num < ndt_ptr->getMaximumIterations());
+
+    // check local_optimal_solution_oscillation_num
+    constexpr int oscillation_num_threshold = 10;
+    result.oscillation_num = count_oscillation(result.debug.transformation_array);
+    result.is_local_optimal_solution_oscillation =
+      (result.oscillation_num > oscillation_num_threshold);
+
+    // check score
+    const auto & score_param = config_.score_estimation;
+    if (score_param.converged_param_type == ConvergedParamType::TRANSFORM_PROBABILITY) {
+      result.score = ndt_result.transform_probability;
+      result.score_threshold = score_param.converged_param_transform_probability;
+    } else if (
+      score_param.converged_param_type ==
+      ConvergedParamType::NEAREST_VOXEL_TRANSFORMATION_LIKELIHOOD) {
+      result.score = ndt_result.nearest_voxel_transformation_likelihood;
+      result.score_threshold = score_param.converged_param_nearest_voxel_transformation_likelihood;
+    } else {
+      result.is_known_converged_param_type = false;
+      return result;
+    }
+    result.is_ok_score = (result.score > result.score_threshold);
+
+    // check is_converged
+    result.is_converged =
+      (result.is_ok_iteration_num || result.is_local_optimal_solution_oscillation) &&
+      result.is_ok_score;
+
+    // covariance estimation
+    const Eigen::Quaterniond map_to_base_link_quat = Eigen::Quaterniond(
+      result.pose.orientation.w, result.pose.orientation.x, result.pose.orientation.y,
+      result.pose.orientation.z);
+    const Eigen::Matrix3d map_to_base_link_rotation =
+      map_to_base_link_quat.normalized().toRotationMatrix();
+
+    const auto & covariance_param = config_.covariance;
+    result.covariance =
+      rotate_covariance(covariance_param.output_pose_covariance, map_to_base_link_rotation);
+    if (
+      covariance_param.covariance_estimation.covariance_estimation_type !=
+      CovarianceEstimationType::FIXED_VALUE) {
+      CovarianceEstimate estimate = estimate_covariance(
+        ndt_result, initial_pose_matrix, *ndt_ptr, sensor_points_in_base_link, covariance_param);
+      const Eigen::Matrix2d estimated_covariance_2d_scaled =
+        estimate.covariance * covariance_param.covariance_estimation.scale_factor;
+      const double default_cov_xx = covariance_param.output_pose_covariance[0];
+      const double default_cov_yy = covariance_param.output_pose_covariance[7];
+      const Eigen::Matrix2d estimated_covariance_2d_adj = pclomp::adjust_diagonal_covariance(
+        estimated_covariance_2d_scaled, ndt_result.pose, default_cov_xx, default_cov_yy);
+      result.covariance[0 + 6 * 0] = estimated_covariance_2d_adj(0, 0);
+      result.covariance[1 + 6 * 1] = estimated_covariance_2d_adj(1, 1);
+      result.covariance[1 + 6 * 0] = estimated_covariance_2d_adj(1, 0);
+      result.covariance[0 + 6 * 1] = estimated_covariance_2d_adj(0, 1);
+      result.debug.multi_ndt_poses = std::move(estimate.multi_ndt_poses);
+      result.debug.multi_initial_poses = std::move(estimate.multi_initial_poses);
+    }
+
+    return result;
+  });
+}
+
+NdtScanMatcherDebugScores NdtScanMatcher::compute_debug_scores(
+  const pcl::PointCloud<pcl::PointXYZ> & sensor_points_in_map,
+  const geometry_msgs::msg::Pose & result_pose, const bool compute_voxel_scores)
+{
+  const auto & no_ground_param = config_.score_estimation.no_ground_points;
+
+  // remove ground
+  std::optional<pcl::PointCloud<pcl::PointXYZ>> no_ground_points_in_map;
+  if (no_ground_param.enable) {
+    no_ground_points_in_map.emplace();
+    no_ground_points_in_map->points.reserve(sensor_points_in_map.size());
+    const double result_pose_z = result_pose.position.z;
+    for (const auto & point : sensor_points_in_map.points) {
+      if (point.z - result_pose_z > no_ground_param.z_margin_for_ground_removal) {
+        no_ground_points_in_map->points.push_back(point);
+      }
+    }
+  }
+
+  return ndt_ptr_.with([&](const auto & ndt_ptr) {
+    NdtScanMatcherDebugScores scores;
+    if (!ndt_ptr->hasTarget()) {
+      return scores;
+    }
+    if (compute_voxel_scores) {
+      scores.voxel_scores = ndt_ptr->calculateNearestVoxelScoreEachPoint(sensor_points_in_map);
+    }
+    if (no_ground_points_in_map) {
+      const double transform_probability =
+        ndt_ptr->calculateTransformationProbability(*no_ground_points_in_map);
+      const double nearest_voxel_transformation_likelihood =
+        ndt_ptr->calculateNearestVoxelTransformationLikelihood(*no_ground_points_in_map);
+      scores.no_ground = NdtScanMatcherDebugScores::NoGround{
+        std::move(*no_ground_points_in_map), transform_probability,
+        nearest_voxel_transformation_likelihood};
+    }
+    return scores;
   });
 }
 
