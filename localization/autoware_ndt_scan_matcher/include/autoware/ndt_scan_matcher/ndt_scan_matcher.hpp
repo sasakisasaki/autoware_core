@@ -28,13 +28,17 @@
 #include <builtin_interfaces/msg/time.hpp>
 #include <tl_expected/expected.hpp>
 
+#include <autoware_internal_debug_msgs/msg/float32_stamped.hpp>
+#include <autoware_internal_debug_msgs/msg/int32_stamped.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -134,14 +138,37 @@ struct ScanMatchLog
   std::string message;
 };
 
-// What the debug outputs of a scan matching are made from.
+// The debug outputs of a scan matching, ready to publish, all stamped with the scan time. They are
+// to be removed after the interface refactoring.
 struct ScanMatchDebug
 {
-  float exe_time;
-  InterpolatedPose interpolation_result;
-  NdtScanMatcherResult result;
-  pcl::PointCloud<pcl::PointXYZ> sensor_points_in_map;
-  NdtScanMatcherDebugScores scores;
+  using Float32Stamped = autoware_internal_debug_msgs::msg::Float32Stamped;
+
+  geometry_msgs::msg::PoseWithCovarianceStamped initial_pose_with_covariance;
+  Float32Stamped exe_time;
+  Float32Stamped transform_probability;
+  Float32Stamped nearest_voxel_transformation_likelihood;
+  autoware_internal_debug_msgs::msg::Int32Stamped iteration_num;
+  // Set by the covariance estimation methods that align from more poses.
+  std::optional<geometry_msgs::msg::PoseArray> multi_ndt_pose;
+  std::optional<geometry_msgs::msg::PoseArray> multi_initial_pose;
+  visualization_msgs::msg::MarkerArray ndt_marker;
+  geometry_msgs::msg::PoseStamped initial_to_result_relative_pose;
+  Float32Stamped initial_to_result_distance;
+  Float32Stamped initial_to_result_distance_old;
+  Float32Stamped initial_to_result_distance_new;
+  sensor_msgs::msg::PointCloud2 points_aligned;
+  // Set when scan_match() was asked to compute the voxel scores.
+  std::optional<sensor_msgs::msg::PointCloud2> voxel_score_points;
+
+  struct NoGround
+  {
+    sensor_msgs::msg::PointCloud2 points_aligned;
+    Float32Stamped transform_probability;
+    Float32Stamped nearest_voxel_transformation_likelihood;
+  };
+  // Set when score_estimation.no_ground_points.enable.
+  std::optional<NoGround> no_ground;
 };
 
 // Everything a scan matching produces, for the node to log and publish.

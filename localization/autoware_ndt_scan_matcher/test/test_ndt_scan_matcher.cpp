@@ -412,8 +412,8 @@ TEST(NdtScanMatcher, ReportsConfiguredCovarianceForFixedValue)  // NOLINT
   EXPECT_NEAR(output.ndt_pose_with_covariance->pose.covariance[0], 0.0225, 1.0e-4);
   EXPECT_NEAR(output.ndt_pose_with_covariance->pose.covariance[7], 0.0225, 1.0e-4);
   ASSERT_TRUE(output.debug.has_value());
-  EXPECT_FALSE(output.debug->result.debug.multi_ndt_poses.has_value());
-  EXPECT_FALSE(output.debug->result.debug.multi_initial_poses.has_value());
+  EXPECT_FALSE(output.debug->multi_ndt_pose.has_value());
+  EXPECT_FALSE(output.debug->multi_initial_pose.has_value());
 }
 
 // Each pose array starts with the main alignment, followed by one pose per offset.
@@ -433,11 +433,10 @@ TEST(NdtScanMatcher, ReportsMultiNdtPosesForMultiNdtCovariance)  // NOLINT
   const auto output = match_scan_from(scan_matcher, 0.5, 0.3);
 
   ASSERT_TRUE(output.debug.has_value());
-  const auto & debug = output.debug->result.debug;
-  ASSERT_TRUE(debug.multi_ndt_poses.has_value());
-  ASSERT_TRUE(debug.multi_initial_poses.has_value());
-  EXPECT_EQ(debug.multi_ndt_poses->size(), 3U);
-  EXPECT_EQ(debug.multi_initial_poses->size(), 3U);
+  ASSERT_TRUE(output.debug->multi_ndt_pose.has_value());
+  ASSERT_TRUE(output.debug->multi_initial_pose.has_value());
+  EXPECT_EQ(output.debug->multi_ndt_pose->poses.size(), 3U);
+  EXPECT_EQ(output.debug->multi_initial_pose->poses.size(), 3U);
 }
 
 TEST(NdtScanMatcher, ScoresEachPointOnlyWhenRequested)  // NOLINT
@@ -449,10 +448,10 @@ TEST(NdtScanMatcher, ScoresEachPointOnlyWhenRequested)  // NOLINT
   const auto with = match_scan_from(scan_matcher, 0.5, 0.3, true);
 
   ASSERT_TRUE(without.debug.has_value());
-  EXPECT_FALSE(without.debug->scores.voxel_scores.has_value());
+  EXPECT_FALSE(without.debug->voxel_score_points.has_value());
   ASSERT_TRUE(with.debug.has_value());
-  ASSERT_TRUE(with.debug->scores.voxel_scores.has_value());
-  EXPECT_EQ(with.debug->scores.voxel_scores->size(), with.debug->sensor_points_in_map.size());
+  ASSERT_TRUE(with.debug->voxel_score_points.has_value());
+  EXPECT_EQ(with.debug->voxel_score_points->width, with.debug->points_aligned.width);
 }
 
 // Points no higher than the margin above the result pose are ground and removed.
@@ -467,16 +466,17 @@ TEST(NdtScanMatcher, RemovesGroundPointsForNoGroundScores)  // NOLINT
   const auto output = match_scan_from(scan_matcher, 0.5, 0.3);
 
   ASSERT_TRUE(output.debug.has_value());
-  ASSERT_TRUE(output.debug->scores.no_ground.has_value());
-  const auto & points_in_map = output.debug->sensor_points_in_map;
-  const double result_z = output.debug->result.pose.position.z;
+  ASSERT_TRUE(output.debug->no_ground.has_value());
+  ASSERT_TRUE(output.ndt_pose.has_value());
+  pcl::PointCloud<pcl::PointXYZ> points_in_map;
+  pcl::fromROSMsg(output.debug->points_aligned, points_in_map);
+  const double result_z = output.ndt_pose->pose.position.z;
   const auto no_ground_num = std::count_if(
     points_in_map.begin(), points_in_map.end(),
     [&](const pcl::PointXYZ & point) { return point.z - result_z > 0.8; });
   EXPECT_GT(no_ground_num, 0);
   EXPECT_LT(static_cast<size_t>(no_ground_num), points_in_map.size());
-  EXPECT_EQ(
-    output.debug->scores.no_ground->points_in_map.size(), static_cast<size_t>(no_ground_num));
+  EXPECT_EQ(output.debug->no_ground->points_aligned.width, static_cast<uint32_t>(no_ground_num));
 }
 
 TEST(NdtScanMatcher, OutputsNothingButDiagnosticsWhenNoMapIsSet)  // NOLINT
