@@ -53,7 +53,6 @@ NdtScanMatcherNode::NdtScanMatcherNode(const rclcpp::NodeOptions & options)
   tf2_broadcaster_(*this),
   tf2_buffer_(this->get_clock()),
   tf2_listener_(tf2_buffer_, *this),
-  is_activated_(false),
   param_(declare_hyper_parameters(this))
 {
   timer_callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -264,8 +263,9 @@ void NdtScanMatcherNode::callback_timer()
   diagnostics_map_update_->add_key_value("timer_callback_time_stamp", ros_time_now.nanoseconds());
 
   // check is_activated
-  diagnostics_map_update_->add_key_value("is_activated", static_cast<bool>(is_activated_));
-  if (!is_activated_) {
+  const bool is_activated = ndt_scan_matcher_->is_activated();
+  diagnostics_map_update_->add_key_value("is_activated", is_activated);
+  if (!is_activated) {
     diagnostics_map_update_->update_level_and_message(
       diagnostic_msgs::msg::DiagnosticStatus::WARN, "Node is not activated.");
     diagnostics_map_update_->publish(ros_time_now);
@@ -314,8 +314,9 @@ void NdtScanMatcherNode::callback_initial_pose_main(
     static_cast<rclcpp::Time>(initial_pose_msg_ptr->header.stamp).nanoseconds());
 
   // check is_activated
-  diagnostics_initial_pose_->add_key_value("is_activated", static_cast<bool>(is_activated_));
-  if (!is_activated_) {
+  const bool is_activated = ndt_scan_matcher_->is_activated();
+  diagnostics_initial_pose_->add_key_value("is_activated", is_activated);
+  if (!is_activated) {
     std::stringstream message;
     message << "Node is not activated.";
     diagnostics_initial_pose_->update_level_and_message(
@@ -364,7 +365,6 @@ void NdtScanMatcherNode::callback_sensor_points(
   input.now = this->now();
   input.sensor_to_base_link =
     lookup_sensor_to_base_link(sensor_points_msg_in_sensor_frame->header.frame_id);
-  input.is_activated = is_activated_;
   input.last_map_update_position =
     last_map_update_position_.with([](const auto & pos) { return pos; });
   input.compute_voxel_scores = voxel_score_points_pub_->get_subscription_count() > 0;
@@ -483,13 +483,10 @@ void NdtScanMatcherNode::service_trigger_node(
   diagnostics_trigger_node_->clear();
   diagnostics_trigger_node_->add_key_value("service_call_time_stamp", ros_time_now.nanoseconds());
 
-  is_activated_ = req->data;
-  if (is_activated_) {
-    ndt_scan_matcher_->clear_initial_poses();
-  }
+  ndt_scan_matcher_->set_activated(req->data);
   res->success = true;
 
-  diagnostics_trigger_node_->add_key_value("is_activated", static_cast<bool>(is_activated_));
+  diagnostics_trigger_node_->add_key_value("is_activated", ndt_scan_matcher_->is_activated());
   diagnostics_trigger_node_->add_key_value("is_succeed_service", res->success);
   diagnostics_trigger_node_->publish(ros_time_now);
 }

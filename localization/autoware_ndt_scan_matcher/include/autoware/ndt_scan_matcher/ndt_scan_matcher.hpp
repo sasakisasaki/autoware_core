@@ -44,6 +44,7 @@
 #include <pcl/point_types.h>
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <string>
@@ -119,14 +120,20 @@ struct InitialPoseEstimationResult
 
 using InterpolatedPose = autoware::localization_util::SmartPoseBuffer::InterpolateResult;
 
-// What scan_match() takes from the ROS runtime and from the rest of the node.
+// What scan_match() takes from the ROS runtime and from the rest of the node, for one scan.
 struct ScanMatchInput
 {
+  // The current time of the node's clock (the simulation time when it is used), to check how late
+  // the scan arrived.
   builtin_interfaces::msg::Time now;
-  // The sensor to base_link transform, or the error text of its TF lookup.
+  // The transform from the frame of the scan to base_link looked up from TF, or the error text of
+  // the lookup when it failed.
   tl::expected<Eigen::Matrix4f, std::string> sensor_to_base_link;
-  bool is_activated{false};
+  // Where the map was last updated around (MapUpdateModule::last_update_position()), to warn when
+  // the vehicle has gone out of the loaded map. nullopt before the first map update.
   std::optional<geometry_msgs::msg::Point> last_map_update_position;
+  // Whether to score each point for the voxel score debug output, e.g. only while that topic has a
+  // subscriber. It goes away with the debug outputs.
   bool compute_voxel_scores{false};
 };
 
@@ -199,8 +206,10 @@ public:
   // aligns from the poses interpolated to its time, and drops the poses older than it.
   void add_initial_pose(const geometry_msgs::msg::PoseWithCovarianceStamped & pose);
 
-  // Drops the kept initial poses, so that no scan aligns from a pose received before.
-  void clear_initial_poses();
+  // Starts or stops the scan matching; scans are only aligned while activated. Activating drops the
+  // kept initial poses, so that no scan aligns from a pose received before.
+  void set_activated(bool activated);
+  bool is_activated() const;
 
   // Keeps a pose to pull the alignment towards, used when ndt_regularization_enable. A scan uses
   // the pose interpolated to its time, and drops the poses older than it.
@@ -241,10 +250,12 @@ private:
   // scan_match() up to the result of this scan; scan_match() adds the check over successive scans.
   ScanMatchOutput scan_match_main(
     const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
-    const ScanMatchInput & input);
+    const ScanMatchInput & input, bool is_activated);
 
   HyperParameters param_;
   ScanMatchDiagnostics scan_match_diagnostics_;
+
+  std::atomic<bool> is_activated_{false};
 
   // Without a logger: the reasons an interpolation fails are not logged.
   autoware::localization_util::SmartPoseBuffer initial_pose_buffer_;

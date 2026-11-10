@@ -162,19 +162,19 @@ sensor_msgs::msg::PointCloud2 make_scan_msg()
 }
 
 // Inputs for a scan from make_scan_msg() received right away.
-ScanMatchInput make_scan_input(const bool is_activated)
+ScanMatchInput make_scan_input()
 {
   ScanMatchInput input;
   input.now.sec = 1;
   input.sensor_to_base_link = Eigen::Matrix4f::Identity();
-  input.is_activated = is_activated;
   return input;
 }
 
-// A scan reaching the activation check is kept for the initial pose estimation.
+// A scan reaching the activation check is kept for the initial pose estimation, also while not
+// activated.
 void keep_scan(NdtScanMatcher & scan_matcher)
 {
-  scan_matcher.scan_match(make_scan_msg(), make_scan_input(false));
+  scan_matcher.scan_match(make_scan_msg(), make_scan_input());
 }
 
 geometry_msgs::msg::PoseWithCovarianceStamped make_stamped_pose(
@@ -195,13 +195,14 @@ void add_initial_poses(NdtScanMatcher & scan_matcher, const double x, const doub
   scan_matcher.add_initial_pose(make_stamped_pose(1, 500000000, x, y));
 }
 
-// Matches make_scan_msg() from an initial pose at (x, y).
+// Activates and matches make_scan_msg() from an initial pose at (x, y).
 ScanMatchOutput match_scan_from(
   NdtScanMatcher & scan_matcher, const double x, const double y,
   const bool compute_voxel_scores = false)
 {
+  scan_matcher.set_activated(true);
   add_initial_poses(scan_matcher, x, y);
-  ScanMatchInput input = make_scan_input(true);
+  ScanMatchInput input = make_scan_input();
   input.compute_voxel_scores = compute_voxel_scores;
   return scan_matcher.scan_match(make_scan_msg(), input);
 }
@@ -495,12 +496,13 @@ TEST(NdtScanMatcher, RejectsAnEmptyScan)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_default_config());
   scan_matcher.update_map(make_rebuild({"0"}));
+  scan_matcher.set_activated(true);
   add_initial_poses(scan_matcher, 0.5, 0.3);
   sensor_msgs::msg::PointCloud2 msg;
   pcl::toROSMsg(pcl::PointCloud<pcl::PointXYZ>(), msg);
   msg.header = make_scan_msg().header;
 
-  const auto output = scan_matcher.scan_match(msg, make_scan_input(true));
+  const auto output = scan_matcher.scan_match(msg, make_scan_input());
 
   EXPECT_TRUE(has_value(output.diagnostics, "sensor_points_size", int64_t{0}));
   EXPECT_TRUE(has_message(output.diagnostics, "Sensor points is empty."));
@@ -511,10 +513,11 @@ TEST(NdtScanMatcher, RejectsAScanWhoseTfLookupFailed)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_default_config());
   scan_matcher.update_map(make_rebuild({"0"}));
+  scan_matcher.set_activated(true);
   add_initial_poses(scan_matcher, 0.5, 0.3);
   auto msg = make_scan_msg();
   msg.header.frame_id = "lidar";
-  ScanMatchInput input = make_scan_input(true);
+  ScanMatchInput input = make_scan_input();
   input.sensor_to_base_link = tl::make_unexpected(std::string("lookup failed"));
 
   const auto output = scan_matcher.scan_match(msg, input);
@@ -532,10 +535,11 @@ TEST(NdtScanMatcher, TransformsTheScanFromTheSensorFrameIntoBaseLink)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_default_config());
   scan_matcher.update_map(make_rebuild({"0"}));
+  scan_matcher.set_activated(true);
   add_initial_poses(scan_matcher, -0.5, 0.3);
   auto msg = make_scan_msg();
   msg.header.frame_id = "lidar";
-  ScanMatchInput input = make_scan_input(true);
+  ScanMatchInput input = make_scan_input();
   Eigen::Matrix4f sensor_to_base_link = Eigen::Matrix4f::Identity();
   sensor_to_base_link(0, 3) = 1.0F;
   input.sensor_to_base_link = sensor_to_base_link;
@@ -566,7 +570,7 @@ TEST(NdtScanMatcher, RejectsAScanWhenNotActivated)  // NOLINT
   scan_matcher.update_map(make_rebuild({"0"}));
   add_initial_poses(scan_matcher, 0.5, 0.3);
 
-  const auto output = scan_matcher.scan_match(make_scan_msg(), make_scan_input(false));
+  const auto output = scan_matcher.scan_match(make_scan_msg(), make_scan_input());
 
   EXPECT_TRUE(has_value(output.diagnostics, "is_activated", false));
   EXPECT_TRUE(has_message(output.diagnostics, "Node is not activated."));
@@ -577,8 +581,9 @@ TEST(NdtScanMatcher, RejectsAScanWithoutInitialPoses)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_default_config());
   scan_matcher.update_map(make_rebuild({"0"}));
+  scan_matcher.set_activated(true);
 
-  const auto output = scan_matcher.scan_match(make_scan_msg(), make_scan_input(true));
+  const auto output = scan_matcher.scan_match(make_scan_msg(), make_scan_input());
 
   EXPECT_TRUE(has_value(output.diagnostics, "is_succeed_interpolate_initial_pose", false));
   EXPECT_TRUE(has_message(output.diagnostics, "Couldn't interpolate pose."));
@@ -592,20 +597,32 @@ TEST(NdtScanMatcher, DropsTheInitialPosesOlderThanAMatchedScan)  // NOLINT
   scan_matcher.update_map(make_rebuild({"0"}));
   ASSERT_TRUE(match_scan_from(scan_matcher, 0.5, 0.3).is_succeed);
 
-  const auto output = scan_matcher.scan_match(make_scan_msg(), make_scan_input(true));
+  const auto output = scan_matcher.scan_match(make_scan_msg(), make_scan_input());
 
   EXPECT_TRUE(has_value(output.diagnostics, "is_succeed_interpolate_initial_pose", false));
 }
 
-TEST(NdtScanMatcher, ForgetsTheInitialPosesWhenCleared)  // NOLINT
+TEST(NdtScanMatcher, IsNotActivatedUntilActivated)  // NOLINT
+{
+  NdtScanMatcher scan_matcher(make_default_config());
+  EXPECT_FALSE(scan_matcher.is_activated());
+
+  scan_matcher.set_activated(true);
+  EXPECT_TRUE(scan_matcher.is_activated());
+
+  scan_matcher.set_activated(false);
+  EXPECT_FALSE(scan_matcher.is_activated());
+}
+
+TEST(NdtScanMatcher, ForgetsTheInitialPosesReceivedBeforeActivation)  // NOLINT
 {
   NdtScanMatcher scan_matcher(make_default_config());
   scan_matcher.update_map(make_rebuild({"0"}));
   add_initial_poses(scan_matcher, 0.5, 0.3);
 
-  scan_matcher.clear_initial_poses();
+  scan_matcher.set_activated(true);
 
-  const auto output = scan_matcher.scan_match(make_scan_msg(), make_scan_input(true));
+  const auto output = scan_matcher.scan_match(make_scan_msg(), make_scan_input());
   EXPECT_TRUE(has_value(output.diagnostics, "is_succeed_interpolate_initial_pose", false));
 }
 

@@ -211,7 +211,6 @@ private:
   // Keep latest position for dynamic map loading
   Guarded<std::optional<geometry_msgs::msg::Point>> latest_ekf_position_{std::nullopt};
 
-  std::atomic<bool> is_activated_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_scan_points_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_initial_pose_;
   std::unique_ptr<DiagnosticsInterface> diagnostics_regularization_pose_;
