@@ -346,9 +346,17 @@ void NdtScanMatcher::add_initial_pose(const geometry_msgs::msg::PoseWithCovarian
     std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(pose));
 }
 
-void NdtScanMatcher::clear_initial_poses()
+void NdtScanMatcher::set_activated(const bool activated)
 {
-  initial_pose_buffer_.clear();
+  is_activated_ = activated;
+  if (activated) {
+    initial_pose_buffer_.clear();
+  }
+}
+
+bool NdtScanMatcher::is_activated() const
+{
+  return is_activated_;
 }
 
 void NdtScanMatcher::add_regularization_pose(
@@ -415,12 +423,13 @@ ScanMatchOutput NdtScanMatcher::scan_match(
   const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
   const ScanMatchInput & input)
 {
-  ScanMatchOutput output = scan_match_main(sensor_points_msg_in_sensor_frame, input);
+  // Read once, so that the whole scan sees the same state.
+  const bool is_activated = is_activated_;
+  ScanMatchOutput output = scan_match_main(sensor_points_msg_in_sensor_frame, input, is_activated);
 
   // check skipping_publish_num
   static int64_t skipping_publish_num = 0;
-  skipping_publish_num =
-    ((output.is_succeed || !input.is_activated) ? 0 : (skipping_publish_num + 1));
+  skipping_publish_num = ((output.is_succeed || !is_activated) ? 0 : (skipping_publish_num + 1));
   output.diagnostics.add_key_value({"skipping_publish_num", skipping_publish_num});
   if (skipping_publish_num >= param_.validation.skipping_publish_num) {
     std::stringstream message;
@@ -433,7 +442,7 @@ ScanMatchOutput NdtScanMatcher::scan_match(
 
 ScanMatchOutput NdtScanMatcher::scan_match_main(
   const sensor_msgs::msg::PointCloud2 & sensor_points_msg_in_sensor_frame,
-  const ScanMatchInput & input)
+  const ScanMatchInput & input, const bool is_activated)
 {
   const auto exe_start_time = std::chrono::system_clock::now();
 
@@ -522,8 +531,8 @@ ScanMatchOutput NdtScanMatcher::scan_match_main(
     [&](auto & points) { points = sensor_points_in_baselink_frame; });
 
   // check is_activated
-  diagnostics.add_key_value({"is_activated", input.is_activated});
-  if (!input.is_activated) {
+  diagnostics.add_key_value({"is_activated", is_activated});
+  if (!is_activated) {
     std::stringstream message;
     message << "Node is not activated.";
     diagnostics.update_level_and_message(DiagnosticLevel::WARN, message.str());
