@@ -128,17 +128,8 @@ private:
   void publish_point_cloud(
     const rclcpp::Time & sensor_ros_time, const std::string & frame_id,
     const pcl::PointCloud<PointSource> & sensor_points_in_map);
-  void publish_marker(
-    const rclcpp::Time & sensor_ros_time, const std::vector<geometry_msgs::msg::Pose> & pose_array);
-  void publish_multi_ndt_poses(
-    const rclcpp::Time & sensor_ros_time, const NdtScanMatcherResult::Debug & debug);
-  // Publishes every debug output of a scan matching. Each one keeps its own condition.
-  void publish_debug(const rclcpp::Time & sensor_ros_time, const ScanMatchDebug & debug);
-  void publish_initial_to_result(
-    const rclcpp::Time & sensor_ros_time, const geometry_msgs::msg::Pose & result_pose_msg,
-    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_cov_msg,
-    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_old_msg,
-    const geometry_msgs::msg::PoseWithCovarianceStamped & initial_pose_new_msg);
+  // Publishes every debug output of a scan matching that the core set.
+  void publish_debug(const ScanMatchDebug & debug);
   using MapUpdateEntry =
     MapUpdateModule::UpdateResult (MapUpdateModule::*)(const geometry_msgs::msg::Point &);
   // Runs one map update through the given MapUpdateModule entry point and applies it to the NDT.
@@ -146,10 +137,6 @@ private:
     MapUpdateEntry entry, const geometry_msgs::msg::Point & position);
   void publish_loaded_map_if_present(
     MapUpdateModule::UpdateResult & result, const rclcpp::Time & stamp) const;
-
-  static pcl::PointCloud<pcl::PointXYZRGB>::Ptr visualize_point_score(
-    const pcl::PointCloud<pcl::PointXYZI> & nvs_points_in_map_i, const float & lower_nvs,
-    const float & upper_nvs);
 
   // Performs the pcd_loader service call for MapUpdateModule, returning nullptr on failure.
   MapUpdateModule::GetDifferentialPointCloudMap::Response::ConstSharedPtr

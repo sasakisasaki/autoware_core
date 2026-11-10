@@ -20,6 +20,7 @@
 #include <autoware/ndt_scan_matcher/ndt_omp/estimate_covariance.hpp>
 #include <autoware/ndt_scan_matcher/ndt_scan_matcher.hpp>
 #include <autoware_utils_geometry/geometry.hpp>
+#include <autoware_utils_visualization/marker_helper.hpp>
 
 #include <pcl/common/transforms.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -39,6 +40,7 @@
 
 namespace autoware::ndt_scan_matcher
 {
+using autoware::localization_util::exchange_color_crc;
 using autoware::localization_util::matrix4f_to_pose;
 using autoware::localization_util::pose_to_matrix4f;
 using autoware::localization_util::SmartPoseBuffer;
@@ -93,6 +95,161 @@ std::optional<InterpolatedPose> interpolate_and_pop_old(
     pose_buffer.pop_old(stamp);
   }
   return interpolated;
+}
+
+autoware_internal_debug_msgs::msg::Float32Stamped make_float32_stamped(
+  const builtin_interfaces::msg::Time & stamp, const float data)
+{
+  using T = autoware_internal_debug_msgs::msg::Float32Stamped;
+  return autoware_internal_debug_msgs::build<T>().stamp(stamp).data(data);
+}
+
+autoware_internal_debug_msgs::msg::Int32Stamped make_int32_stamped(
+  const builtin_interfaces::msg::Time & stamp, const int32_t data)
+{
+  using T = autoware_internal_debug_msgs::msg::Int32Stamped;
+  return autoware_internal_debug_msgs::build<T>().stamp(stamp).data(data);
+}
+
+template <typename PointT>
+sensor_msgs::msg::PointCloud2 make_point_cloud_msg(
+  const pcl::PointCloud<PointT> & points, const builtin_interfaces::msg::Time & stamp,
+  const std::string & frame_id)
+{
+  sensor_msgs::msg::PointCloud2 msg;
+  pcl::toROSMsg(points, msg);
+  msg.header.stamp = stamp;
+  msg.header.frame_id = frame_id;
+  return msg;
+}
+
+geometry_msgs::msg::PoseArray make_pose_array(
+  const std::vector<geometry_msgs::msg::Pose> & poses, const builtin_interfaces::msg::Time & stamp,
+  const std::string & frame_id)
+{
+  geometry_msgs::msg::PoseArray msg;
+  msg.header.stamp = stamp;
+  msg.header.frame_id = frame_id;
+  msg.poses = poses;
+  return msg;
+}
+
+// The poses of the alignment iterations as arrows, padded with blank ones up to the most there can
+// be, so that those of a longer alignment before are overwritten.
+visualization_msgs::msg::MarkerArray make_marker_array(
+  const std::vector<geometry_msgs::msg::Pose> & pose_array,
+  const builtin_interfaces::msg::Time & stamp, const std::string & frame_id,
+  const int max_iterations)
+{
+  visualization_msgs::msg::MarkerArray marker_array;
+  visualization_msgs::msg::Marker marker;
+  marker.header.stamp = stamp;
+  marker.header.frame_id = frame_id;
+  marker.type = visualization_msgs::msg::Marker::ARROW;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.scale = autoware_utils_visualization::create_marker_scale(0.3, 0.1, 0.1);
+  int i = 0;
+  marker.ns = "result_pose_matrix_array";
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  for (const auto & pose_msg : pose_array) {
+    marker.id = i++;
+    marker.pose = pose_msg;
+    marker.color = exchange_color_crc((1.0 * i) / 15.0);
+    marker_array.markers.push_back(marker);
+  }
+
+  // TODO(Tier IV): delete old marker
+  for (; i < max_iterations + 2;) {
+    marker.id = i++;
+    marker.pose = geometry_msgs::msg::Pose();
+    marker.color = exchange_color_crc(0);
+    marker_array.markers.push_back(marker);
+  }
+  return marker_array;
+}
+
+// The points colored by their nearest voxel score, from lower_nvs to upper_nvs.
+pcl::PointCloud<pcl::PointXYZRGB> visualize_point_score(
+  const pcl::PointCloud<pcl::PointXYZI> & nvs_points_in_map_i, const float & lower_nvs,
+  const float & upper_nvs)
+{
+  pcl::PointCloud<pcl::PointXYZRGB> nvs_points_in_map_rgb;
+
+  const float range = upper_nvs - lower_nvs;
+  for (std::size_t i = 0; i < nvs_points_in_map_i.size(); i++) {
+    pcl::PointXYZRGB point;
+    point.x = nvs_points_in_map_i.points[i].x;
+    point.y = nvs_points_in_map_i.points[i].y;
+    point.z = nvs_points_in_map_i.points[i].z;
+    std_msgs::msg::ColorRGBA color =
+      exchange_color_crc((nvs_points_in_map_i.points[i].intensity - lower_nvs) / range);
+    point.r = static_cast<std::uint8_t>(color.r * 255);
+    point.g = static_cast<std::uint8_t>(color.g * 255);
+    point.b = static_cast<std::uint8_t>(color.b * 255);
+    nvs_points_in_map_rgb.points.push_back(point);
+  }
+  return nvs_points_in_map_rgb;
+}
+
+ScanMatchDebug make_scan_match_debug(
+  const builtin_interfaces::msg::Time & stamp, const HyperParameters & param, const float exe_time,
+  const InterpolatedPose & interpolation_result, const NdtScanMatcherResult & result,
+  const pcl::PointCloud<pcl::PointXYZ> & sensor_points_in_map,
+  const NdtScanMatcherDebugScores & scores)
+{
+  const std::string & map_frame = param.frame.map_frame;
+  const pclomp::NdtResult & ndt_result = result.ndt_result;
+  const geometry_msgs::msg::Pose & initial_pose = interpolation_result.interpolated_pose.pose.pose;
+
+  ScanMatchDebug debug;
+  debug.initial_pose_with_covariance = interpolation_result.interpolated_pose;
+  debug.exe_time = make_float32_stamped(stamp, exe_time);
+  debug.transform_probability = make_float32_stamped(stamp, ndt_result.transform_probability);
+  debug.nearest_voxel_transformation_likelihood =
+    make_float32_stamped(stamp, ndt_result.nearest_voxel_transformation_likelihood);
+  debug.iteration_num = make_int32_stamped(stamp, ndt_result.iteration_num);
+  if (result.debug.multi_ndt_poses) {
+    debug.multi_ndt_pose = make_pose_array(*result.debug.multi_ndt_poses, stamp, map_frame);
+  }
+  if (result.debug.multi_initial_poses) {
+    debug.multi_initial_pose = make_pose_array(*result.debug.multi_initial_poses, stamp, map_frame);
+  }
+  debug.ndt_marker = make_marker_array(
+    result.debug.transformation_array, stamp, map_frame, param.ndt.max_iterations);
+
+  debug.initial_to_result_relative_pose.pose =
+    autoware_utils_geometry::inverse_transform_pose(result.pose, initial_pose);
+  debug.initial_to_result_relative_pose.header.stamp = stamp;
+  debug.initial_to_result_relative_pose.header.frame_id = map_frame;
+  debug.initial_to_result_distance = make_float32_stamped(
+    stamp, static_cast<float>(
+             autoware::localization_util::norm(initial_pose.position, result.pose.position)));
+  debug.initial_to_result_distance_old = make_float32_stamped(
+    stamp, static_cast<float>(autoware::localization_util::norm(
+             interpolation_result.old_pose.pose.pose.position, result.pose.position)));
+  debug.initial_to_result_distance_new = make_float32_stamped(
+    stamp, static_cast<float>(autoware::localization_util::norm(
+             interpolation_result.new_pose.pose.pose.position, result.pose.position)));
+
+  debug.points_aligned = make_point_cloud_msg(sensor_points_in_map, stamp, map_frame);
+
+  // check each of point score
+  if (scores.voxel_scores) {
+    const float lower_nvs = 1.0f;
+    const float upper_nvs = 3.5f;
+    debug.voxel_score_points = make_point_cloud_msg(
+      visualize_point_score(*scores.voxel_scores, lower_nvs, upper_nvs), stamp, map_frame);
+  }
+
+  // score based on no ground points
+  if (scores.no_ground) {
+    debug.no_ground = ScanMatchDebug::NoGround{
+      make_point_cloud_msg(scores.no_ground->points_in_map, stamp, map_frame),
+      make_float32_stamped(stamp, static_cast<float>(scores.no_ground->transform_probability)),
+      make_float32_stamped(
+        stamp, static_cast<float>(scores.no_ground->nearest_voxel_transformation_likelihood))};
+  }
+  return debug;
 }
 
 std::shared_ptr<NdtScanMatcher::NormalDistributionsTransform> make_empty_ndt(
@@ -497,9 +654,8 @@ ScanMatchOutput NdtScanMatcher::scan_match_main(
   pcl::transformPointCloud(*sensor_points_in_baselink_frame, sensor_points_in_map, ndt_result.pose);
   NdtScanMatcherDebugScores scores =
     compute_debug_scores(sensor_points_in_map, result.pose, input.compute_voxel_scores);
-  output.debug = ScanMatchDebug{
-    exe_time, interpolation_result, std::move(result), std::move(sensor_points_in_map),
-    std::move(scores)};
+  output.debug = make_scan_match_debug(
+    sensor_stamp, param_, exe_time, interpolation_result, result, sensor_points_in_map, scores);
 
   return output;
 }
