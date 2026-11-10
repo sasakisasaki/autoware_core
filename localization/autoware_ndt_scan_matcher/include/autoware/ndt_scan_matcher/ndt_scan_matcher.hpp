@@ -21,10 +21,10 @@
 #include "map_update_module.hpp"
 #include "ndt_omp/multigrid_ndt_omp.h"
 #include "particle.hpp"
-#include "pose_buffer.hpp"
 #include "scan_match_diagnostics.hpp"
 
 #include <Eigen/Core>
+#include <autoware/localization_util/smart_pose_buffer.hpp>
 #include <builtin_interfaces/msg/time.hpp>
 #include <tl_expected/expected.hpp>
 
@@ -113,7 +113,7 @@ struct InitialPoseEstimationResult
   } debug;
 };
 
-using InterpolatedPose = PoseBuffer::InterpolateResult;
+using InterpolatedPose = autoware::localization_util::SmartPoseBuffer::InterpolateResult;
 
 // What scan_match() takes from the ROS runtime and from the rest of the node.
 struct ScanMatchInput
@@ -126,18 +126,10 @@ struct ScanMatchInput
   bool compute_voxel_scores{false};
 };
 
-// A log line of the scan matching, for the node to write. The POSE_BUFFER kinds are the reasons an
-// input pose could not be interpolated, written without a throttle; the others are throttled per
-// kind.
+// A log line of the scan matching, for the node to write with a throttle per kind.
 struct ScanMatchLog
 {
-  enum class Kind {
-    TF_LOOKUP_FAILED,
-    OUT_OF_MAP_RANGE,
-    SCORE_BELOW_THRESHOLD,
-    POSE_BUFFER_INFO,
-    POSE_BUFFER_WARN
-  };
+  enum class Kind { TF_LOOKUP_FAILED, OUT_OF_MAP_RANGE, SCORE_BELOW_THRESHOLD };
   Kind kind;
   std::string message;
 };
@@ -227,8 +219,9 @@ private:
   HyperParameters param_;
   ScanMatchDiagnostics scan_match_diagnostics_;
 
-  Guarded<PoseBuffer> initial_pose_buffer_;
-  Guarded<PoseBuffer> regularization_pose_buffer_;
+  // Without a logger: the reasons an interpolation fails are not logged.
+  autoware::localization_util::SmartPoseBuffer initial_pose_buffer_;
+  autoware::localization_util::SmartPoseBuffer regularization_pose_buffer_;
 
   // The last scan that passed the input checks, in base_link.
   Guarded<pcl::PointCloud<pcl::PointXYZ>::ConstPtr> sensor_points_in_base_link_;

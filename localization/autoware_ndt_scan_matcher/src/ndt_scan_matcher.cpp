@@ -41,6 +41,7 @@ namespace autoware::ndt_scan_matcher
 {
 using autoware::localization_util::matrix4f_to_pose;
 using autoware::localization_util::pose_to_matrix4f;
+using autoware::localization_util::SmartPoseBuffer;
 using autoware::localization_util::TreeStructuredParzenEstimator;
 
 namespace
@@ -84,28 +85,14 @@ void append_report(DiagnosticsReport & report, const DiagnosticsReport & other)
 }
 
 // Interpolates the poses to the stamp and, if it could, drops the poses older than the stamp.
-// Otherwise it adds the reasons to the logs.
 std::optional<InterpolatedPose> interpolate_and_pop_old(
-  Guarded<PoseBuffer> & pose_buffer, const builtin_interfaces::msg::Time & stamp,
-  std::vector<ScanMatchLog> & logs)
+  SmartPoseBuffer & pose_buffer, const builtin_interfaces::msg::Time & stamp)
 {
-  auto interpolated = pose_buffer.with([&](auto & buffer) {
-    auto result = buffer.interpolate(stamp);
-    if (result) {
-      buffer.pop_old(stamp);
-    }
-    return result;
-  });
-  if (!interpolated) {
-    for (const auto & log : interpolated.error()) {
-      logs.push_back(
-        {log.level == PoseBuffer::Log::Level::INFO ? ScanMatchLog::Kind::POSE_BUFFER_INFO
-                                                   : ScanMatchLog::Kind::POSE_BUFFER_WARN,
-         log.message});
-    }
-    return std::nullopt;
+  auto interpolated = pose_buffer.interpolate(stamp);
+  if (interpolated) {
+    pose_buffer.pop_old(stamp);
   }
-  return std::move(interpolated.value());
+  return interpolated;
 }
 
 std::shared_ptr<NdtScanMatcher::NormalDistributionsTransform> make_empty_ndt(
@@ -198,18 +185,20 @@ NdtScanMatcher::NdtScanMatcher(const HyperParameters & param)
 
 void NdtScanMatcher::add_initial_pose(const geometry_msgs::msg::PoseWithCovarianceStamped & pose)
 {
-  initial_pose_buffer_.with([&](auto & buffer) { buffer.push_back(pose); });
+  initial_pose_buffer_.push_back(
+    std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(pose));
 }
 
 void NdtScanMatcher::clear_initial_poses()
 {
-  initial_pose_buffer_.with([](auto & buffer) { buffer.clear(); });
+  initial_pose_buffer_.clear();
 }
 
 void NdtScanMatcher::add_regularization_pose(
   const geometry_msgs::msg::PoseWithCovarianceStamped & pose)
 {
-  regularization_pose_buffer_.with([&](auto & buffer) { buffer.push_back(pose); });
+  regularization_pose_buffer_.push_back(
+    std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(pose));
 }
 
 std::optional<double> NdtScanMatcher::update_map(const MapUpdateModule::NdtUpdate & update)
@@ -386,7 +375,7 @@ ScanMatchOutput NdtScanMatcher::scan_match_main(
 
   // check is_succeed_interpolate_initial_pose
   const std::optional<InterpolatedPose> interpolation_result_opt =
-    interpolate_and_pop_old(initial_pose_buffer_, sensor_stamp, output.logs);
+    interpolate_and_pop_old(initial_pose_buffer_, sensor_stamp);
   const bool is_succeed_interpolate_initial_pose = interpolation_result_opt.has_value();
   diagnostics.add_key_value(
     {"is_succeed_interpolate_initial_pose", is_succeed_interpolate_initial_pose});
@@ -406,7 +395,7 @@ ScanMatchOutput NdtScanMatcher::scan_match_main(
   std::optional<geometry_msgs::msg::Pose> regularization_pose;
   if (param_.ndt_regularization_enable) {
     const std::optional<InterpolatedPose> regularization_result =
-      interpolate_and_pop_old(regularization_pose_buffer_, sensor_stamp, output.logs);
+      interpolate_and_pop_old(regularization_pose_buffer_, sensor_stamp);
     if (regularization_result) {
       regularization_pose = regularization_result->interpolated_pose.pose.pose;
     }

@@ -49,7 +49,6 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/ndt_scan_matcher_node.cpp
   src/ndt_scan_matcher_helper.cpp
   src/particle.cpp
-  src/pose_buffer.cpp
   src/scan_match_diagnostics.cpp
 )
 
@@ -119,11 +118,6 @@ if(BUILD_TESTING)
     test/test_ndt_scan_matcher_helper.cpp
   )
   target_link_libraries(test_ndt_scan_matcher_helper ${PROJECT_NAME})
-
-  ament_auto_add_gtest(test_pose_buffer
-    test/test_pose_buffer.cpp
-  )
-  target_link_libraries(test_pose_buffer ${PROJECT_NAME})
 
   ament_auto_add_gtest(test_scan_match_diagnostics
     test/test_scan_match_diagnostics.cpp

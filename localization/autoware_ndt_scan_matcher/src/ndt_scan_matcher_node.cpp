@@ -425,12 +425,6 @@ void NdtScanMatcherNode::write_logs(const std::vector<ScanMatchLog> & logs)
       case ScanMatchLog::Kind::SCORE_BELOW_THRESHOLD:
         RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, log.message);
         break;
-      case ScanMatchLog::Kind::POSE_BUFFER_INFO:
-        RCLCPP_INFO_STREAM(this->get_logger(), log.message);
-        break;
-      case ScanMatchLog::Kind::POSE_BUFFER_WARN:
-        RCLCPP_WARN_STREAM(this->get_logger(), log.message);
-        break;
     }
   }
 }

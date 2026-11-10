@@ -582,7 +582,6 @@ TEST(NdtScanMatcher, RejectsAScanWithoutInitialPoses)  // NOLINT
 
   EXPECT_TRUE(has_value(output.diagnostics, "is_succeed_interpolate_initial_pose", false));
   EXPECT_TRUE(has_message(output.diagnostics, "Couldn't interpolate pose."));
-  EXPECT_TRUE(has_log(output, ScanMatchLog::Kind::POSE_BUFFER_INFO));
   EXPECT_FALSE(output.tf.has_value());
 }
 
@@ -620,7 +619,6 @@ TEST(NdtScanMatcher, AlignsWithoutRegularizationWhenNoRegularizationPoseIsKept) 
   const auto output = match_scan_from(scan_matcher, 0.5, 0.3);
 
   EXPECT_TRUE(output.is_succeed);
-  EXPECT_TRUE(has_log(output, ScanMatchLog::Kind::POSE_BUFFER_INFO));
 }
 
 TEST(NdtScanMatcher, ReportsMapNotSetWhenEstimatingInitialPoseBeforeFirstUpdate)  // NOLINT
