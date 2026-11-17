@@ -16,10 +16,12 @@
 #define NDT_SCAN_MATCHER_HELPER_HPP_
 
 #include <Eigen/Core>
+#include <builtin_interfaces/msg/time.hpp>
 
 #include <geometry_msgs/msg/pose.hpp>
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 namespace autoware::ndt_scan_matcher
@@ -35,6 +37,13 @@ std::array<double, 36> rotate_covariance(
  * sequence of poses. A step is counted as an inversion when the cosine between consecutive motion
  * vectors falls below an internal threshold. */
 int count_oscillation(const std::vector<geometry_msgs::msg::Pose> & result_pose_msg_array);
+
+/** \brief The time stamp in nanoseconds, as rclcpp::Time(stamp).nanoseconds() gives it. */
+int64_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp);
+
+/** \brief A time or duration in nanoseconds as seconds, as rclcpp::Time::seconds() and
+ * rclcpp::Duration::seconds() compute it. */
+double to_seconds(int64_t nanoseconds);
 
 }  // namespace autoware::ndt_scan_matcher
 

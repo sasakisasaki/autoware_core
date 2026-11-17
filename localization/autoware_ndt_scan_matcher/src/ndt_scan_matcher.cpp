@@ -41,6 +41,7 @@ namespace autoware::ndt_scan_matcher
 {
 using autoware::localization_util::matrix4f_to_pose;
 using autoware::localization_util::pose_to_matrix4f;
+using autoware::localization_util::SmartPoseBuffer;
 using autoware::localization_util::TreeStructuredParzenEstimator;
 
 namespace
@@ -73,11 +74,6 @@ double apply_map_cells(
   return static_cast<double>(duration_micro_sec) / 1000.0;
 }
 
-int64_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
-{
-  return static_cast<int64_t>(stamp.sec) * 1000000000LL + static_cast<int64_t>(stamp.nanosec);
-}
-
 // Adds the key values and the level and message of a report to another, as applying both to one
 // DiagnosticsInterface would.
 void append_report(DiagnosticsReport & report, const DiagnosticsReport & other)
@@ -86,6 +82,17 @@ void append_report(DiagnosticsReport & report, const DiagnosticsReport & other)
     report.add_key_value(key_value);
   }
   report.update_level_and_message(other.level, other.message);
+}
+
+// Interpolates the poses to the stamp and, if it could, drops the poses older than the stamp.
+std::optional<InterpolatedPose> interpolate_and_pop_old(
+  SmartPoseBuffer & pose_buffer, const builtin_interfaces::msg::Time & stamp)
+{
+  auto interpolated = pose_buffer.interpolate(stamp);
+  if (interpolated) {
+    pose_buffer.pop_old(stamp);
+  }
+  return interpolated;
 }
 
 std::shared_ptr<NdtScanMatcher::NormalDistributionsTransform> make_empty_ndt(
@@ -167,10 +174,31 @@ NdtScanMatcher::NdtScanMatcher(const HyperParameters & param)
   scan_match_diagnostics_(ScanMatchDiagnosticsConfig{
     param.validation.initial_to_result_distance_tolerance_m,
     param.validation.critical_upper_bound_exe_time_ms}),
+  initial_pose_buffer_(
+    param.validation.initial_pose_timeout_sec, param.validation.initial_pose_distance_tolerance_m),
+  regularization_pose_buffer_(1000.0, 1000.0),  // unlimited
   sensor_points_in_base_link_(nullptr),
   ndt_ptr_(make_empty_ndt(param.ndt)),
   secondary_ndt_ptr_(make_empty_ndt(param.ndt))
 {
+}
+
+void NdtScanMatcher::add_initial_pose(const geometry_msgs::msg::PoseWithCovarianceStamped & pose)
+{
+  initial_pose_buffer_.push_back(
+    std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(pose));
+}
+
+void NdtScanMatcher::clear_initial_poses()
+{
+  initial_pose_buffer_.clear();
+}
+
+void NdtScanMatcher::add_regularization_pose(
+  const geometry_msgs::msg::PoseWithCovarianceStamped & pose)
+{
+  regularization_pose_buffer_.push_back(
+    std::make_shared<geometry_msgs::msg::PoseWithCovarianceStamped>(pose));
 }
 
 std::optional<double> NdtScanMatcher::update_map(const MapUpdateModule::NdtUpdate & update)
@@ -272,9 +300,7 @@ ScanMatchOutput NdtScanMatcher::scan_match_main(
 
   // check sensor_points_delay_time_sec
   const double sensor_points_delay_time_sec =
-    std::chrono::duration<double>(
-      std::chrono::nanoseconds(to_nanoseconds(input.now) - to_nanoseconds(sensor_stamp)))
-      .count();
+    to_seconds(to_nanoseconds(input.now) - to_nanoseconds(sensor_stamp));
   diagnostics.add_key_value({"sensor_points_delay_time_sec", sensor_points_delay_time_sec});
   if (sensor_points_delay_time_sec > param_.sensor_points.timeout_sec) {
     std::stringstream message;
@@ -348,7 +374,9 @@ ScanMatchOutput NdtScanMatcher::scan_match_main(
   }
 
   // check is_succeed_interpolate_initial_pose
-  const bool is_succeed_interpolate_initial_pose = input.initial_pose.has_value();
+  const std::optional<InterpolatedPose> interpolation_result_opt =
+    interpolate_and_pop_old(initial_pose_buffer_, sensor_stamp);
+  const bool is_succeed_interpolate_initial_pose = interpolation_result_opt.has_value();
   diagnostics.add_key_value(
     {"is_succeed_interpolate_initial_pose", is_succeed_interpolate_initial_pose});
   if (!is_succeed_interpolate_initial_pose) {
@@ -361,8 +389,17 @@ ScanMatchOutput NdtScanMatcher::scan_match_main(
     return output;
   }
 
-  output.used_input_poses = true;
-  const InterpolatedPose & interpolation_result = input.initial_pose.value();
+  const InterpolatedPose & interpolation_result = interpolation_result_opt.value();
+
+  // if regularization is enabled and available, pass its pose to NDT for regularization
+  std::optional<geometry_msgs::msg::Pose> regularization_pose;
+  if (param_.ndt_regularization_enable) {
+    const std::optional<InterpolatedPose> regularization_result =
+      interpolate_and_pop_old(regularization_pose_buffer_, sensor_stamp);
+    if (regularization_result) {
+      regularization_pose = regularization_result->interpolated_pose.pose.pose;
+    }
+  }
 
   // Warn if the lidar has gone out of the map range
   const bool is_out_of_map_range = out_of_map_range(
@@ -380,7 +417,7 @@ ScanMatchOutput NdtScanMatcher::scan_match_main(
   // perform ndt scan matching
   auto align_result = align(
     sensor_points_in_baselink_frame, interpolation_result.interpolated_pose.pose.pose,
-    input.regularization_pose);
+    regularization_pose);
 
   // check is_set_map_points (align() fails only with MAP_NOT_SET)
   const bool is_set_map_points = align_result.has_value();
